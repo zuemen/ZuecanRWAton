@@ -15,11 +15,15 @@ docker run --rm -v "$PWD:/w" -w /tmp "$image" sh -c '
   for i in $(seq 1 300); do [ -s /tmp/port ] && break; sleep 1; done
   [ -s /tmp/port ] || { echo "sandbox did not start"; tail -40 /tmp/sandbox.log; exit 1; }
   echo "Canton sandbox up after ${i}s"
+  status=0
   daml script --dar /w/test/.daml/dist/zuecan-rwa-test-0.1.0.dar \
     --script-name Test.Canton:allScenarios \
-    --ledger-host localhost --ledger-port 6865 --static-time --upload-dar yes > /tmp/script.log 2>&1
-  status=$?
-  grep -oE "running [A-Za-z.]+" /tmp/script.log || true
+    --ledger-host localhost --ledger-port 6865 --static-time --upload-dar yes > /tmp/script.log 2>&1 || status=$?
+  grep -oE "running [A-Za-z0-9.]+" /tmp/script.log || true
+  if [ "$status" -ne 0 ]; then
+    echo "---- daml script output (stack frames omitted) ----"
+    grep -vE "^[[:space:]]+at |^\[INFO\]" /tmp/script.log | cut -c1-400 | tail -40
+  fi
   exit $status
 ' 2>&1 | tee /tmp/canton-test.log
 status=${PIPESTATUS[0]}
