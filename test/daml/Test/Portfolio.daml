@@ -1,0 +1,121 @@
+-- | Proof of reserves with a position list, and the money-market limits the
+--   ledger measures it against.
+module Test.Portfolio where
+
+import DA.Date (addDays, toDateUTC)
+import DA.Text (isInfixOf)
+import Daml.Script
+
+import Test.Setup
+import Zuecan.Portfolio
+import Zuecan.Registry
+import Zuecan.Subscription
+
+-- | WAM looks through to the next rate reset, WAL does not; Treasury bills
+--   and cash count as liquid whatever their maturity.
+metricsFollowRule2a7Definitions : Script ()
+metricsFollowRule2a7Definitions = do
+  today <- toDateUTC <$> getTime
+  let floater = (position "3130-FRN" AgencyDiscountNote 10.0 (addDays today 300)) with resetDate = Some (addDays today 7)
+      positions =
+        [ position "CASH-USD" Cash 25.0 today
+        , position "912797-4W" TreasuryBill 40.0 (addDays today 28)
+        , position "912797-8W" TreasuryBill 25.0 (addDays today 56)
+        , floater
+        ]
+      m = measure today positions
+  assertMsg ("value " <> show m.value) (m.value == 100.0)
+  -- (25*0 + 40*28 + 25*56 + 10*7) / 100
+  assertMsg ("WAM " <> show m.wamDays) (m.wamDays == 25.9)
+  -- (25*0 + 40*28 + 25*56 + 10*300) / 100
+  assertMsg ("WAL " <> show m.walDays) (m.walDays == 55.2)
+  assertMsg "longest maturity" (m.longestMaturityDays == 300)
+  -- The agency floater is neither daily nor weekly liquid (300 days out).
+  assertMsg ("daily liquid " <> show m.dailyLiquidBps) (m.dailyLiquidBps == 9000.0)
+  assertMsg ("weekly liquid " <> show m.weeklyLiquidBps) (m.weeklyLiquidBps == 9000.0)
+  assertMsg "all government" (m.governmentBps == 10000.0)
+  assertMsg "compliant" (null (breaches governmentMmfRules positions m))
+  assertMsg "an empty portfolio is compliant" (null (breaches governmentMmfRules [] (measure today [])))
+
+-- | The reserve figure is the positions' total, recorded publicly with the
+--   measured metrics.
+reserveIsTheSumOfPositions : Script ()
+reserveIsTheSumOfPositions = do
+  w <- setup
+  (_, w) <- subscribe w w.p.alice w.aliceCred 100000.0
+  w <- attest w 100004.25 "custodian-statement-day-1"
+  reg <- register w
+  assertMsg "attested reserve = sum of market values" (reg.attestedReserve == 100004.25)
+  assertMsg "no breaches" (null reg.portfolioBreaches)
+  [(_, record)] <- query @ReserveAttestation w.p.public
+  assertMsg "the public sees the positions and metrics"
+    (length record.positions == 3 && record.metrics.value == 100004.25 && null record.portfolioBreaches)
+  checkReconciles w
+
+-- | A portfolio outside the limits is recorded, stops new money, and still
+--   lets holders out. A compliant statement reopens subscriptions.
+breachingPortfolioStopsSubscriptionsOnly : Script ()
+breachingPortfolioStopsSubscriptionsOnly = do
+  w <- setup
+  (holding, w) <- subscribe w w.p.alice w.aliceCred 100000.0
+  today <- toDateUTC <$> getTime
+  -- Everything in 200-day bills: WAM and WAL far over the limits.
+  w <- attestPositions w [position "912797-200D" TreasuryBill 100000.0 (addDays today 200)] "statement-long-duration"
+  reg <- register w
+  assertMsg ("expected WAM and WAL breaches, got " <> show reg.portfolioBreaches)
+    (length reg.portfolioBreaches == 2
+      && any ("weighted average maturity" `isInfixOf`) reg.portfolioBreaches
+      && any ("weighted average life" `isInfixOf`) reg.portfolioBreaches)
+  [(_, record)] <- query @ReserveAttestation w.p.public
+  assertMsg "the breach is public" (record.portfolioBreaches == reg.portfolioBreaches)
+
+  req <- requestSubscription w w.p.bob 50000.0
+  expectFailure "the portfolio breaches the fund's limits: weighted average maturity" w.p.ta do
+    exerciseCmd req SettleSubscription with
+      termsCid = w.termsCid, registerCid = w.registerCid, navCid = w.navCid, credentialCid = w.bobCred
+
+  (redeemReq, _) <- submit w.p.alice do exerciseCmd holding RequestRedemption with amount = 1000.0
+  payout <- submit w.p.ta do
+    exerciseCmd redeemReq ApproveRedemption with termsCid = w.termsCid, navCid = w.navCid, credentialCid = w.aliceCred
+  custodianCash <- largestCash w.p.custodian
+  (_, registerCid) <- submit w.p.custodian do
+    exerciseCmd payout Pay with cashCid = custodianCash, registerCid = w.registerCid, termsCid = w.termsCid, navCid = w.navCid
+  let w' = w with registerCid
+
+  w' <- attest w' 98957.5 "statement-rebalanced"
+  _ <- submit w.p.ta do
+    exerciseCmd req SettleSubscription with
+      termsCid = w'.termsCid, registerCid = w'.registerCid, navCid = w'.navCid, credentialCid = w'.bobCred
+  pure ()
+
+-- | Each remaining limit, one breach at a time.
+eachLimitIsEnforced : Script ()
+eachLimitIsEnforced = do
+  today <- toDateUTC <$> getTime
+  let rules = governmentMmfRules
+      check expected positions = do
+        let found = breaches rules positions (measure today positions)
+        assertMsg ("expected only \"" <> expected <> "\", got " <> show found)
+          (case found of [b] -> expected `isInfixOf` b; _ -> False)
+  -- 1% outside government assets.
+  check "government assets"
+    [ position "912797-4W" TreasuryBill 99.0 (addDays today 28)
+    , position "CORP-CP" OtherSecurity 1.0 (addDays today 28) ]
+  -- A sliver maturing beyond 397 days, too small to move the averages.
+  check "beyond 397"
+    [ position "912797-4W" TreasuryBill 999.0 (addDays today 28)
+    , position "912810-LONG" TreasuryBill 1.0 (addDays today 400) ]
+  -- Repo and agency paper maturing in 20 days: compliant averages, but
+  -- nothing is daily liquid; the agency notes keep weekly liquidity at 60%.
+  check "daily liquid assets"
+    [ position "REPO-20D" GovernmentRepo 40.0 (addDays today 20)
+    , position "3130-DN" AgencyDiscountNote 60.0 (addDays today 20) ]
+  -- Same, but repo at 60% pushes weekly liquidity under 50% as well.
+  let both = [ position "REPO-20D" GovernmentRepo 60.0 (addDays today 20)
+             , position "3130-DN" AgencyDiscountNote 40.0 (addDays today 20) ]
+      found = breaches rules both (measure today both)
+  assertMsg ("expected daily and weekly liquidity breaches, got " <> show found)
+    (length found == 2 && any ("weekly liquid assets" `isInfixOf`) found)
+  check "non-positive market value"
+    [ position "912797-4W" TreasuryBill 100.0 (addDays today 28)
+    , position "912797-BAD" TreasuryBill 0.0 (addDays today 28) ]

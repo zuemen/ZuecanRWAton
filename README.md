@@ -15,13 +15,14 @@ ZuecanRWAton 是一個寫在 **Canton 帳本（Daml 3.4）** 上的真實資產�
 
 | 檢驗 | PepeLab（合成） | ZuecanRWAton（代幣化） | 在哪裡強制 |
 |---|---|---|---|
-| 鏈下有沒有真的資產？ | 沒有；只有價格 | 託管機構對基金資產出具聲明，聲明本身上鏈並公開 | `FundRegister.Attest`、`ReserveAttestation` |
-| 代幣數量對不對得上資產？ | 不足額抵押（AssetVault 自述） | **任何一筆發行都要通過「流通份數 × NAV ≤ 已證明儲備＋聲明後的鏈上淨流入」**；聲明過期就不能發行。發行只能由帳冊執行：要投資人授權、消耗投資人真的鎖定的現金、份數由帳冊按 NAV 計算 | `FundRegister.RecordIssuance` |
-| 持有人有沒有權利？ | 沒有 | 持有部位由**過戶代理與持有人雙簽**；任何轉出、凍結、扣押都只能走持有人簽署時就同意的 choice，並留下紀錄 | `Zuecan.Holding` |
+| 鏈下有沒有真的資產？ | 沒有；只有價格 | 託管機構逐筆申報基金持倉（證券代號、面額、市值、到期日），儲備＝持倉市值總和；申報與違規項目上鏈公開 | `FundRegister.Attest`、`ReserveAttestation` |
+| 代幣數量對不對得上資產？ | 不足額抵押（AssetVault 自述） | **任何一筆發行都要通過「流通份數 × NAV ≤ 已證明儲備＋聲明後的鏈上淨流入」**；聲明過期就不能發行。發行只能由帳冊執行：要投資人授權、消耗投資人真的鎖定的現金、份數由帳冊按 NAV 計算。每份份數都要託管機構共簽，**帳冊之外不可能出現份數** | `FundRegister.RecordIssuance` |
+| 持有人有沒有權利？ | 沒有 | 持有部位由**過戶代理、託管機構與持有人三方簽署**；任何轉出、凍結、扣押都只能走持有人簽署時就同意的 choice，並留下紀錄 | `Zuecan.Registry` |
 
 此外：
 - **合格投資人**：申購、受讓、成交都要出示 KYC 機構簽發、未過期、制裁篩檢未逾 90 天的憑證，而且投資人類別與法域要在基金條款允許清單內。撤銷憑證會立刻生效。
 - **儲備不足時的處理**：託管聲明低於負債時，新申購與以舊 NAV 贖回**都會被拒**（避免先跑的人佔便宜）。要等基金行政重新計算 NAV 才能恢復。
+- **貨幣基金投資限制（Rule 2a-7）**：帳本由申報的持倉計算 WAM、WAL、最長到期、每日／每週流動資產與政府資產占比；任一項違規就停止新申購（贖回照常），違規內容公開。
 - **監理機關**：以 observer 身分看得到所有持有部位、託管聲明、成交雙方與執法紀錄，而且可以下令停牌；監理停牌只有監理機關能解除。
 - **公開資訊**：帳冊總量、NAV、儲備聲明歷史、成交的價格與數量對 `Public` 角色公開，**不含**交易雙方身分。
 
@@ -30,7 +31,7 @@ ZuecanRWAton 是一個寫在 **Canton 帳本（Daml 3.4）** 上的真實資產�
 | 角色 | 在帳本上做什麼 | 正式環境的對應 |
 |---|---|---|
 | `TransferAgent`（過戶代理／登記機構） | 簽署基金條款、持有部位；處理申購贖回；凍結、扣押 | 基金的 transfer agent |
-| `Custodian`（託管機構） | 與過戶代理共同簽署帳冊；出具儲備聲明；支付贖回款 | 保管銀行 |
+| `Custodian`（託管機構） | 與過戶代理共同簽署帳冊與每一份持有部位；逐筆申報持倉；支付贖回款 | 保管銀行 |
 | `FundAdministrator`（基金行政） | 每日計算並公布 NAV | fund administrator |
 | `KycAgent`（KYC 機構） | 簽發、重新篩檢、撤銷投資人憑證 | 持牌的 KYC／AML 服務商 |
 | `VenueOperator`（交易場所） | 款券同步交割；停牌；價格帶與單筆上限 | 受監理的代幣化證券交易場所 |
@@ -52,10 +53,10 @@ sequenceDiagram
   I->>K: CredentialRequest
   K-->>I: InvestorCredential（可撤銷、會過期）
   N->>N: NavReport（每日）
-  C->>TA: FundRegister.Attest（儲備聲明）
+  C->>TA: FundRegister.Attest（持倉明細 → 儲備、Rule 2a-7 指標）
   I->>I: CashHolding.Lock（給過戶代理、收款人＝託管機構）
   I->>TA: SubscriptionRequest
-  TA->>TA: SettleSubscription：查 KYC、NAV、儲備覆蓋 → 發行 FundHolding，現金付給託管機構
+  TA->>TA: SettleSubscription → RecordIssuance：查 KYC、NAV、投資組合、儲備覆蓋 → 發行 FundHolding，現金付給託管機構
   I->>I: FundHolding.ListForSale（詢價回覆給指定買方）
   Note over I,V: 買方鎖定價金給交易場所 → Take → MatchedTrade
   V->>V: Settle：停牌？價格帶？單筆上限？買方合格？賣方未被制裁？→ 同一筆交易交割
@@ -66,17 +67,22 @@ sequenceDiagram
 
 ## 執行
 
-需要 Docker。Daml SDK 3.4 的穩定版只能用 Digital Asset 的 `dpm` 安裝，所以本 repo 固定使用 Docker Hub 上的官方映像（CI 以 digest 鎖定）：
+需要 Docker。Daml SDK 3.4 的穩定版只能用 Digital Asset 的 `dpm` 安裝，所以本 repo 固定使用 Docker Hub 上的官方映像（CI 以 digest 鎖定）。
 
 ```bash
-docker run --rm -v "$PWD:/w" -w /w digitalasset/daml-sdk:3.4.0-rc2 \
-  sh -c 'daml build --all && cd test && daml test --show-coverage --all'
+scripts/daml-test.sh      # IDE ledger：全部情境＋覆蓋率門檻（約 30 秒）
+scripts/canton-test.sh    # 真正的 Canton participant：起 sandbox、上傳 DAR、依序跑全部情境（約 10 分鐘）
+scripts/mutation_test.py  # 突變測試（約 20 分鐘，3 路平行）
 ```
 
 - `main/`：上帳本的合約（package `zuecan-rwa`）。**不依賴 daml-script**，可以上傳到 Canton participant，之後用 Smart Contract Upgrade 升級。
-- `test/`：Daml Script 情境測試（package `zuecan-rwa-test`），目前 25 個情境，另有 4 個共用的 setup 腳本；`Test.Setup:demo` 是 `daml start` 的示範資料。CI 會擋下「有任何 choice（內建 Archive 除外）沒被測試執行到」的變更。
-- 每個失敗情境都用 `expectFailure` 比對錯誤訊息，確認是被**預期的那條規則**擋下；大部分情境結尾都跑 `checkReconciles`，確認監理機關看得到的所有份數（含託管中的）等於帳冊流通量。
-- 突變測試：逐一拿掉 46 條關鍵檢查或授權，確認每一條都至少讓一個測試失敗（結果見 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#測試與突變測試)）。
+- `test/`：Daml Script 情境測試（package `zuecan-rwa-test`），目前 29 個情境。
+  - CI 會擋下有任何 choice（內建 Archive 除外）沒被測試執行到的變更。
+  - `Test.Canton:allScenarios` 依序跑完全部情境，供 Canton 實跑使用。
+  - `Test.Setup:demo` 是 `daml start` 的示範資料。
+- **Canton 實跑**：同一批情境不只在模擬帳本（IDE ledger）上跑，也透過 Ledger API 在真正的 Canton sandbox participant（靜態時間）上跑，CI 每次都執行。
+- 每個失敗情境都用 `expectFailure` 比對錯誤訊息，確認是被**預期的那條規則**擋下。大部分情境結尾都跑 `checkReconciles`，確認監理機關看得到的所有份數（含託管中的）等於帳冊流通量。
+- 突變測試：逐一拿掉每一條關鍵檢查或授權，確認每一條都至少讓一個測試失敗（結果見 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#測試與突變測試)）。
 
 ## 目錄
 
@@ -85,15 +91,18 @@ main/daml/Zuecan/
   Types.daml          共用型別與數值工具（6 位小數無條件捨去）
   Compliance.daml     KYC 憑證：申請、核發、重新篩檢、撤銷；資格檢查
   Cash.daml           結算現金與託管鎖定（只能付給約定收款人、逾期由持有人取回）
-  Fund.daml           基金條款、NAV、雙簽帳冊（儲備覆蓋檢查）、儲備聲明
+  Fund.daml           基金條款、NAV
+  Portfolio.daml      持倉與 Rule 2a-7 指標（WAM、WAL、最長到期、流動資產、政府資產占比）
+  Registry.daml       帳冊（雙簽、儲備覆蓋、發行與註銷）、持有部位與所有移動方式：轉讓、詢價成交、贖回、凍結、扣押
   Market.daml         交易場所控制（停牌、價格帶、單筆上限）、成交公告與監理申報
-  Holding.daml        持有部位與所有移動方式：轉讓、詢價成交、贖回、凍結、扣押
   Subscription.daml   申購
 test/daml/Test/
   Setup.daml          測試世界與共用工具
   Primary.daml        發行端情境
   Secondary.daml      次級市場與執法情境
-  Controls.daml       單方不得改帳、雜項
+  Portfolio.daml      持倉申報與投資組合限制
+  Controls.daml       單方不得改帳、帳冊外不得出現份數、雜項
+  Canton.daml         依序執行全部情境（Canton 實跑用）
 docs/
   ARCHITECTURE.md     設計、授權與隱私矩陣、不變式、取捨
   COMPLIANCE_MAPPING.md  SEC 創新豁免、Rule 2a-7、台灣規範對照
@@ -102,8 +111,12 @@ docs/
 
 ## 路線圖
 
-1. **Canton LocalNet**：用 Splice LocalNet 起 participant，透過 JSON Ledger API 跑同樣的流程。
+已完成：
+- ~~在真正的 Canton participant 上跑~~：`scripts/canton-test.sh`，CI 每次執行。
+- ~~儲備聲明細項與 Rule 2a-7 限制~~：`Zuecan.Portfolio`。
+
+接下來：
+1. **Canton Network LocalNet**：用 Splice LocalNet（含 synchronizer 與多個 participant）跑同樣的流程，讓每個角色各自在不同節點。
 2. **對接 Canton Network 代幣標準**（CIP-0056，細節未查證），讓持有部位可以被錢包與其他應用辨識。
 3. **真實結算資產**：以 Canton 上的受監管穩定幣取代 `UsdIssuer` 替身。
-4. **儲備聲明細項**：聲明附上持倉明細（CUSIP、面額、到期日），在帳本上檢查政府 MMF 的投資組合限制（WAM ≤ 60 天、WAL ≤ 120 天、單筆到期 ≤ 397 天）。
-5. **前端與後端**：投資人入口、過戶代理後台、監理檢視頁。
+4. **前端與後端**：投資人入口、過戶代理後台、監理檢視頁（透過 JSON Ledger API）。

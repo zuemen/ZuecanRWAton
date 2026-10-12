@@ -1,22 +1,39 @@
--- | Fund units and every way they can move.
+-- | The book of record: the register that ties units outstanding to the
+--   reserves the custodian attests to, the units themselves, and every way
+--   units can move.
 --
---   A holding is signed by both the transfer agent (registrar) and the owner:
---   the registrar cannot take units away without a choice the owner agreed to
---   by holding the contract, and the owner cannot move units without the
---   registrar's rules running. Every path that delivers units to a new owner
---   checks the receiver's credential against the fund's eligibility rules.
+--   Every unit contract (a holding, or units in escrow) is signed by the
+--   transfer agent (registrar), the custodian and the owner. So:
+--
+--   * no unit can exist without the custodian's signature, and the custodian
+--     only signs inside the register's issuance (or when units already
+--     covered by the register move). The transfer agent cannot create units
+--     for itself, or for anyone, outside the register;
+--   * the registrar cannot take units away without a choice the owner agreed
+--     to by holding the contract;
+--   * every path that delivers units to a new owner checks the receiver's
+--     credential against the fund's eligibility rules.
 --
 --   Units leaving a holding go into an escrow contract (a transfer offer, a
---   sell order, a redemption request) signed by the same two parties, so they
+--   sell order, a redemption request) signed by the same parties, so they
 --   cannot be spent twice while the counterparty decides.
-module Zuecan.Holding
-  ( FundHolding (..)
+module Zuecan.Registry
+  ( FundStatus (..)
+  , FundRegister (..)
+  , RegisterProposal (..)
+  , ReserveAttestation (..)
+  , FundHolding (..)
   , TransferOffer (..)
   , SellOrder (..)
   , MatchedTrade (..)
   , RedemptionRequest (..)
   , RedemptionPayout (..)
   , EnforcementRecord (..)
+  , AcceptAppointment (..)
+  , Attest (..)
+  , RecordIssuance (..)
+  , RecordRedemption (..)
+  , SetStatus (..)
   , SplitUnits (..)
   , MergeUnits (..)
   , OfferTransfer (..)
@@ -38,25 +55,243 @@ module Zuecan.Holding
   , CancelRedemption (..)
   , Pay (..)
   , CancelPayout (..)
+  , liability
+  , coverage
   , settlementDeadline
   ) where
 
+import DA.Date (toDateUTC)
+import DA.Text (intercalate)
 import DA.Time
 import qualified Zuecan.Cash as Cash
 import Zuecan.Compliance (InvestorCredential, checkEligible, checkScreened)
 import Zuecan.Fund
 import Zuecan.Market
+import Zuecan.Portfolio
 import Zuecan.Types
+
+data FundStatus
+  = Open                    -- ^ subscriptions and redemptions
+  | SubscriptionsSuspended  -- ^ redemptions only
+  | Suspended               -- ^ neither (e.g. pending a NAV correction)
+  deriving (Eq, Show)
+
+-- ---------------------------------------------------------------------------
+-- The register
+-- ---------------------------------------------------------------------------
+
+-- | The transfer agent appoints the custodian; the register only exists once
+--   the custodian accepts.
+template RegisterProposal
+  with
+    instrument : InstrumentId
+    custodian : Party
+    regulator : Party
+    readers : [Party]
+  where
+    signatory instrument.registrar
+    observer custodian
+
+    choice AcceptAppointment : ContractId FundRegister
+      controller custodian
+      do
+        now <- getTime
+        create FundRegister with
+          instrument, custodian, regulator, readers
+          outstanding = 0.0
+          attestedReserve = 0.0
+          attestedAt = now
+          attestationSeq = 0
+          statementRef = "appointment"
+          portfolioBreaches = []
+          netFlowSinceAttestation = 0.0
+          status = Open
+
+-- | The custodian's statement of what it holds for the fund, with the
+--   position list and the money-market limits measured against it. Kept as
+--   a public history (proof of reserves).
+template ReserveAttestation
+  with
+    instrument : InstrumentId
+    custodian : Party
+    readers : [Party]
+    positions : [Position]
+    metrics : PortfolioMetrics
+    portfolioBreaches : [Text]
+    attestedAt : Time
+    seq : Int
+    statementRef : Text
+  where
+    signatory custodian
+    observer instrument.registrar, readers
+
+-- | The register of record. Every issuance and redemption goes through it, so
+--   `outstanding` is the authoritative unit count, and the coverage check
+--   runs on every issuance.
+--
+--   It is under dual control: signed by both the transfer agent and the
+--   custodian, so neither can archive it and start a new one with a different
+--   unit count or reserve figure on its own.
+--
+--   `netFlowSinceAttestation` is the cash that came in (subscriptions) or
+--   went out (redemptions) on-ledger since the custodian's last statement; the
+--   custodian resets it to zero when it attests, because its new statement
+--   already includes that cash.
+template FundRegister
+  with
+    instrument : InstrumentId
+    custodian : Party
+    regulator : Party
+    readers : [Party]
+    outstanding : Decimal
+    attestedReserve : Decimal
+    attestedAt : Time
+    attestationSeq : Int
+    statementRef : Text
+    portfolioBreaches : [Text]  -- ^ limits the last statement's portfolio breaks
+    netFlowSinceAttestation : Decimal
+    status : FundStatus
+  where
+    signatory instrument.registrar, custodian
+    observer regulator, readers
+    ensure outstanding >= 0.0 && attestedReserve >= 0.0
+
+    -- | The custodian reports the fund's positions. The reserve figure is
+    --   their total market value, so it cannot disagree with the positions.
+    --   A portfolio that breaks the fund's limits is still recorded (hiding
+    --   it would be worse) but stops new subscriptions until it is fixed.
+    choice Attest : (ContractId FundRegister, ContractId ReserveAttestation)
+      with
+        positions : [Position]
+        newStatementRef : Text
+        termsCid : ContractId FundTerms
+      controller custodian
+      do
+        assertMsg "a statement reference is required" (newStatementRef /= "")
+        terms <- fetch termsCid
+        checkTermsFor instrument terms
+        now <- getTime
+        let metrics = measure (toDateUTC now) positions
+            found = breaches terms.portfolioRules positions metrics
+            seq' = attestationSeq + 1
+        record <- create ReserveAttestation with
+          instrument, custodian, readers, positions, metrics
+          portfolioBreaches = found
+          attestedAt = now
+          seq = seq'
+          statementRef = newStatementRef
+        register <- create this with
+          attestedReserve = metrics.value
+          attestedAt = now
+          attestationSeq = seq'
+          statementRef = newStatementRef
+          portfolioBreaches = found
+          netFlowSinceAttestation = 0.0
+        pure (register, record)
+
+    -- | The only way units come into existence. It needs the subscriber's
+    --   authority as well as the transfer agent's, and runs with the
+    --   custodian's as a signatory of the register, so it can create the
+    --   holding itself; it consumes the subscriber's cash lock, so the cash it
+    --   counts is real and counted once; and it prices the units itself, so
+    --   the caller cannot choose how many.
+    choice RecordIssuance : (ContractId FundRegister, ContractId FundHolding, ContractId Cash.CashHolding)
+      with
+        subscriber : Party
+        lockedCashCid : ContractId Cash.LockedCash
+        credentialCid : ContractId InvestorCredential
+        termsCid : ContractId FundTerms
+        navCid : ContractId NavReport
+      controller instrument.registrar, subscriber
+      do
+        now <- getTime
+        terms <- fetch termsCid
+        checkTermsFor instrument terms
+        assertMsg "the register's custodian is not the fund's custodian" (terms.custodian == custodian)
+        assertMsg "the register's regulator is not the fund's regulator" (terms.regulator == regulator)
+        nav <- fetch navCid
+        checkNav terms now nav
+        cred <- fetch credentialCid
+        checkEligible terms.compliance subscriber terms.eligibility now cred
+        assertMsg "the fund is not open for subscriptions" (status == Open)
+        assertMsg "the custodian's reserve attestation is out of date"
+          (isWithin terms.maxAttestationAge now attestedAt)
+        assertMsg ("the portfolio breaches the fund's limits: " <> intercalate "; " portfolioBreaches)
+          (null portfolioBreaches)
+        lc <- fetch lockedCashCid
+        assertMsg "the escrowed cash is not the subscriber's, held for this fund's custodian in its settlement asset"
+          (lc.owner == subscriber && lc.lockedTo == instrument.registrar && lc.payee == custodian
+            && lc.issuer == terms.cashIssuer && lc.currency == terms.currency)
+        assertMsg "below the fund's minimum subscription" (lc.amount >= terms.minSubscription)
+        let units = floor6 (lc.amount / nav.navPerUnit)
+        assertMsg "the subscription buys less than one millionth of a unit" (units > 0.0)
+        let next = this with
+              outstanding = outstanding + units
+              netFlowSinceAttestation = netFlowSinceAttestation + lc.amount
+        assertMsg "issuance would leave units not fully backed by attested reserves"
+          (liability next nav.navPerUnit <= coverage next)
+        custodyCash <- exercise lockedCashCid Cash.PayOut
+        register <- create next
+        holding <- create FundHolding with
+          instrument, custodian, owner = subscriber, units, frozen = False, regulator
+        pure (register, holding, custodyCash)
+
+    -- | Retire units against a payment. Needs both the transfer agent and the
+    --   custodian, who is the one paying (RedemptionPayout.Pay).
+    choice RecordRedemption : ContractId FundRegister
+      with
+        units : Decimal
+        cashOut : Decimal
+        termsCid : ContractId FundTerms
+        navCid : ContractId NavReport
+      controller instrument.registrar, custodian
+      do
+        now <- getTime
+        terms <- fetch termsCid
+        checkTermsFor instrument terms
+        nav <- fetch navCid
+        checkNav terms now nav
+        assertMsg "the fund is suspended" (status /= Suspended)
+        assertMsg "the custodian's reserve attestation is out of date"
+          (isWithin terms.maxAttestationAge now attestedAt)
+        assertMsg "cannot redeem more units than are outstanding" (units > 0.0 && units <= outstanding)
+        assertMsg "a redemption must pay out cash" (cashOut > 0.0)
+        -- Paying redeemers at NAV out of a reserve that no longer covers
+        -- everyone favours whoever leaves first. Stop and reprice instead.
+        assertMsg "reserves are below liabilities at NAV; redemptions wait for the NAV agent and custodian to reconcile"
+          (liability this nav.navPerUnit <= coverage this)
+        create this with
+          outstanding = outstanding - units
+          netFlowSinceAttestation = netFlowSinceAttestation - cashOut
+
+    choice SetStatus : ContractId FundRegister
+      with
+        newStatus : FundStatus
+      controller instrument.registrar
+      do create this with status = newStatus
+
+-- | Units outstanding valued at `navPerUnit`.
+liability : FundRegister -> Decimal -> Decimal
+liability register navPerUnit = register.outstanding * navPerUnit
+
+-- | What backs the units: the last attested reserve plus on-ledger flows since.
+coverage : FundRegister -> Decimal
+coverage register = register.attestedReserve + register.netFlowSinceAttestation
+
+-- ---------------------------------------------------------------------------
+-- Units
+-- ---------------------------------------------------------------------------
 
 template FundHolding
   with
     instrument : InstrumentId
+    custodian : Party
     owner : Party
     units : Decimal
     frozen : Bool
     regulator : Party
   where
-    signatory instrument.registrar, owner
+    signatory instrument.registrar, custodian, owner
     observer regulator
     ensure units > 0.0 && units == floor6 units
 
@@ -78,7 +313,8 @@ template FundHolding
       do
         other <- fetch otherCid
         assertMsg "can only merge holdings of the same instrument and owner"
-          (other.instrument == instrument && other.owner == owner && other.regulator == regulator)
+          (other.instrument == instrument && other.custodian == custodian
+            && other.owner == owner && other.regulator == regulator)
         assertMsg "the holding is frozen" (not frozen && not other.frozen)
         archive otherCid
         create this with units = units + other.units
@@ -93,7 +329,7 @@ template FundHolding
       do
         rest <- carveOut this amount
         offer <- create TransferOffer with
-          instrument, sender = owner, receiver, units = amount, regulator
+          instrument, custodian, sender = owner, receiver, units = amount, regulator
         pure (offer, rest)
 
     -- | Quote units to one buyer (the request-for-quote reply) at `price` per
@@ -115,20 +351,19 @@ template FundHolding
         assertMsg "cannot sell to yourself" (buyer /= owner)
         rest <- carveOut this amount
         order <- create SellOrder with
-          instrument, seller = owner, buyer, operator, regulator
+          instrument, custodian, seller = owner, buyer, operator, regulator
           units = amount, price, cashIssuer, currency, expiresAt, settleWithin
         pure (order, rest)
 
     choice RequestRedemption : (ContractId RedemptionRequest, Optional (ContractId FundHolding))
       with
-        custodian : Party
         amount : Decimal
       controller owner
       do
         now <- getTime
         rest <- carveOut this amount
         request <- create RedemptionRequest with
-          instrument, investor = owner, custodian, regulator, units = amount, requestedAt = now
+          instrument, custodian, investor = owner, regulator, units = amount, requestedAt = now
         pure (request, rest)
 
     -- | Legal or regulatory hold. A frozen holding cannot be split, merged,
@@ -163,12 +398,13 @@ template FundHolding
 template TransferOffer
   with
     instrument : InstrumentId
+    custodian : Party
     sender : Party
     receiver : Party
     units : Decimal
     regulator : Party
   where
-    signatory instrument.registrar, sender
+    signatory instrument.registrar, custodian, sender
     observer receiver, regulator
 
     choice AcceptTransfer : ContractId FundHolding
@@ -182,21 +418,22 @@ template TransferOffer
         checkTermsFor instrument terms
         cred <- fetch credentialCid
         checkEligible terms.compliance receiver terms.eligibility now cred
-        deliver instrument receiver units regulator
+        deliver instrument custodian receiver units regulator
 
     choice DeclineTransfer : ContractId FundHolding
       controller receiver
-      do deliver instrument sender units regulator
+      do deliver instrument custodian sender units regulator
 
     choice WithdrawTransfer : ContractId FundHolding
       controller sender
-      do deliver instrument sender units regulator
+      do deliver instrument custodian sender units regulator
 
 -- | A firm quote to one buyer. Taking it requires the buyer to have locked
 --   exactly the notional for the venue to pay the seller.
 template SellOrder
   with
     instrument : InstrumentId
+    custodian : Party
     seller : Party
     buyer : Party
     operator : Party
@@ -208,7 +445,7 @@ template SellOrder
     expiresAt : Time
     settleWithin : RelTime
   where
-    signatory instrument.registrar, seller
+    signatory instrument.registrar, custodian, seller
     observer buyer, operator, regulator
 
     choice Take : ContractId MatchedTrade
@@ -229,12 +466,12 @@ template SellOrder
         -- the venue could still pay the seller after the trade was aborted.
         assertMsg "the cash lock must lapse exactly at the settlement deadline" (lc.releaseAfter == deadline)
         create MatchedTrade with
-          instrument, seller, buyer, operator, regulator, units, price
+          instrument, custodian, seller, buyer, operator, regulator, units, price
           cashIssuer, currency, lockedCashCid, matchedAt = now, deadline
 
     choice CancelOrder : ContractId FundHolding
       controller seller
-      do deliver instrument seller units regulator
+      do deliver instrument custodian seller units regulator
 
 -- | Both sides committed; the venue settles delivery-versus-payment in one
 --   transaction or unwinds. If it does neither by `deadline`, either
@@ -242,6 +479,7 @@ template SellOrder
 template MatchedTrade
   with
     instrument : InstrumentId
+    custodian : Party
     seller : Party
     buyer : Party
     operator : Party
@@ -254,7 +492,7 @@ template MatchedTrade
     matchedAt : Time
     deadline : Time
   where
-    signatory instrument.registrar, seller, buyer
+    signatory instrument.registrar, custodian, seller, buyer
     observer operator, regulator
 
     choice Settle : (ContractId FundHolding, ContractId Cash.CashHolding, ContractId TradePrint)
@@ -289,7 +527,7 @@ template MatchedTrade
         sellerCred <- fetch sellerCredentialCid
         checkScreened terms.compliance seller terms.eligibility now sellerCred
         paid <- exercise lockedCashCid Cash.PayOut
-        delivered <- deliver instrument buyer units regulator
+        delivered <- deliver instrument custodian buyer units regulator
         tradePrint <- create TradePrint with
           operator, instrument, readers = [terms.publicParty, regulator]
           units, price, currency, navAtExecution = nav.navPerUnit, executedAt = now
@@ -303,7 +541,7 @@ template MatchedTrade
       controller operator
       do
         refund <- exercise lockedCashCid Cash.Release
-        restored <- deliver instrument seller units regulator
+        restored <- deliver instrument custodian seller units regulator
         pure (restored, refund)
 
     -- | The seller takes the units back once the venue's time is up. The
@@ -317,19 +555,19 @@ template MatchedTrade
         assertMsg "only a counterparty can abort" (actor == seller || actor == buyer)
         now <- getTime
         assertMsg "the venue still has until the deadline to settle" (now >= deadline)
-        deliver instrument seller units regulator
+        deliver instrument custodian seller units regulator
 
 template RedemptionRequest
   with
     instrument : InstrumentId
-    investor : Party
     custodian : Party
+    investor : Party
     regulator : Party
     units : Decimal
     requestedAt : Time
   where
-    signatory instrument.registrar, investor
-    observer custodian, regulator
+    signatory instrument.registrar, custodian, investor
+    observer regulator
 
     -- | Forward pricing: units are redeemed at the NAV current when the
     --   transfer agent processes the request, not the one when it was made.
@@ -343,7 +581,6 @@ template RedemptionRequest
         now <- getTime
         terms <- fetch termsCid
         checkTermsFor instrument terms
-        assertMsg "the request names a custodian that is not the fund's" (terms.custodian == custodian)
         nav <- fetch navCid
         checkNav terms now nav
         cred <- fetch credentialCid
@@ -352,34 +589,34 @@ template RedemptionRequest
         let cashAmount = floor6 (units * nav.navPerUnit)
         assertMsg "the redemption is worth less than one cent" (cashAmount >= 0.01)
         create RedemptionPayout with
-          instrument, investor, custodian, regulator, units, cashAmount
+          instrument, custodian, investor, regulator, units, cashAmount
           navPerUnit = nav.navPerUnit, approvedAt = now
 
     choice RejectRedemption : ContractId FundHolding
       with
         reason : Text
       controller instrument.registrar
-      do deliver instrument investor units regulator
+      do deliver instrument custodian investor units regulator
 
     choice CancelRedemption : ContractId FundHolding
       controller investor
-      do deliver instrument investor units regulator
+      do deliver instrument custodian investor units regulator
 
 -- | The transfer agent has struck the price; the custodian pays out of the
 --   fund's cash and the units are retired in the same transaction.
 template RedemptionPayout
   with
     instrument : InstrumentId
-    investor : Party
     custodian : Party
+    investor : Party
     regulator : Party
     units : Decimal
     cashAmount : Decimal
     navPerUnit : Decimal
     approvedAt : Time
   where
-    signatory instrument.registrar, investor
-    observer custodian, regulator
+    signatory instrument.registrar, custodian, investor
+    observer regulator
 
     choice Pay : (ContractId Cash.CashHolding, ContractId FundRegister)
       with
@@ -402,7 +639,7 @@ template RedemptionPayout
       with
         reason : Text
       controller instrument.registrar
-      do deliver instrument investor units regulator
+      do deliver instrument custodian investor units regulator
 
 -- | Audit trail of freezes, unfreezes and seizures.
 template EnforcementRecord
@@ -432,9 +669,12 @@ carveOut h amount = do
     then pure None
     else Some <$> create h with units = h.units - amount
 
-deliver : InstrumentId -> Party -> Decimal -> Party -> Update (ContractId FundHolding)
-deliver instrument owner units regulator =
-  create FundHolding with instrument, owner, units, frozen = False, regulator
+-- | Units back into a holding. Only ever called inside a choice whose
+--   contract the custodian signed (an escrow of units already on the
+--   register), which is what authorizes the custodian's signature here.
+deliver : InstrumentId -> Party -> Party -> Decimal -> Party -> Update (ContractId FundHolding)
+deliver instrument custodian owner units regulator =
+  create FundHolding with instrument, custodian, owner, units, frozen = False, regulator
 
 recordEnforcement : FundHolding -> Text -> Text -> Update (ContractId EnforcementRecord)
 recordEnforcement h action reference = do

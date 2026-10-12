@@ -6,7 +6,7 @@
 
 ## 1. Daml 的授權模型：先懂這三條
 
-1. **建立一份合約，要所有 signatory 的授權。** 例如持有部位 `FundHolding` 有兩位 signatory（過戶代理和持有人），所以沒有任何一方能單獨變出一份。
+1. **建立一份合約，要所有 signatory 的授權。** 例如持有部位 `FundHolding` 有三位 signatory（過戶代理、託管機構、持有人），所以沒有任何一方能單獨變出一份。
 2. **choice 執行時，擁有「該合約全部 signatory＋這個 choice 的 controller」的授權**，但不會繼承外層 choice 的授權。
    因此像交割這種同時需要買方、賣方、過戶代理的動作，要先由大家共同簽一份中間合約（`MatchedTrade`），再在它的 choice 裡完成。
 3. **合約不可修改，只能封存再建立新的。** 「更新」其實是 consuming choice 封存舊合約、建立新合約；拿著舊合約 id 的人會失敗。
@@ -23,16 +23,16 @@
 | `Cash:LockedCash` | 穩定幣發行人 | 持有人、`lockedTo`、`payee` | 託管中的現金 |
 | `Fund:FundTerms` | 過戶代理 | 託管、行政、KYC、場所、監理、Public | 基金條款，`offeringDocHash` 指向公開說明書 |
 | `Fund:NavReport` | 基金行政 | 過戶代理、`readers` | 每份只有一個有效版本 |
-| `Fund:RegisterProposal` | 過戶代理 | 託管 | 任命託管機構 |
-| `Fund:FundRegister` | **過戶代理＋託管** | 監理、Public | 雙簽帳冊 |
-| `Fund:ReserveAttestation` | 託管 | 過戶代理、`readers` | 儲備聲明歷史 |
-| `Holding:FundHolding` | **過戶代理＋持有人** | 監理 | 持有部位 |
-| `Holding:TransferOffer` | 過戶代理＋轉出人 | 受讓人、監理 | 場外轉讓的託管 |
-| `Holding:SellOrder` | 過戶代理＋賣方 | 指定買方、場所、監理 | 詢價回覆（確定報價） |
-| `Holding:MatchedTrade` | 過戶代理＋賣方＋買方 | 場所、監理 | 待交割 |
-| `Holding:RedemptionRequest` | 過戶代理＋投資人 | 託管、監理 | 贖回申請 |
-| `Holding:RedemptionPayout` | 過戶代理＋投資人 | 託管、監理 | 已定價、待付款 |
-| `Holding:EnforcementRecord` | 過戶代理 | 持有人、監理 | 凍結、解凍、扣押紀錄 |
+| `Registry:RegisterProposal` | 過戶代理 | 託管 | 任命託管機構 |
+| `Registry:FundRegister` | **過戶代理＋託管** | 監理、Public | 雙簽帳冊 |
+| `Registry:ReserveAttestation` | 託管 | 過戶代理、`readers` | 儲備聲明歷史：持倉明細、投資組合指標、違規項目 |
+| `Registry:FundHolding` | **過戶代理＋託管＋持有人** | 監理 | 持有部位 |
+| `Registry:TransferOffer` | 過戶代理＋託管＋轉出人 | 受讓人、監理 | 場外轉讓的託管 |
+| `Registry:SellOrder` | 過戶代理＋託管＋賣方 | 指定買方、場所、監理 | 詢價回覆（確定報價） |
+| `Registry:MatchedTrade` | 過戶代理＋託管＋賣方＋買方 | 場所、監理 | 待交割 |
+| `Registry:RedemptionRequest` | 過戶代理＋託管＋投資人 | 監理 | 贖回申請 |
+| `Registry:RedemptionPayout` | 過戶代理＋託管＋投資人 | 監理 | 已定價、待付款 |
+| `Registry:EnforcementRecord` | 過戶代理 | 持有人、監理 | 凍結、解凍、扣押紀錄 |
 | `Market:MarketControl` | 交易場所 | 監理、過戶代理、`readers` | 停牌、價格帶、單筆上限 |
 | `Market:TradePrint` | 交易場所 | Public、監理 | 公開成交資訊，不含身分 |
 | `Market:RegulatoryTradeReport` | 交易場所 | 監理 | 含雙方身分 |
@@ -44,6 +44,7 @@
 |---|---|---|---|---|---|---|
 | 投資人 | ✅ | ❌ | ❌ | ✅（以 `readAs Public`） | ✅（以 `readAs Public`） | 只有自己參與的 |
 | 交易場所 | — | ❌ | 只限 `relying` 名單 | ✅ | ✅ | ✅ |
+| 託管機構 | — | ✅（共簽每份部位） | ❌ | ✅ | ✅ | 不經它的 participant |
 | 監理機關 | — | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Public | — | ❌ | ❌ | ✅ | ✅ | ❌ |
 
@@ -66,8 +67,11 @@ Canton 只把合約送到它的 stakeholder 所在的 participant，所以這張
 | I10 | 帳冊不能被單方改寫 | `FundRegister` 雙簽 | `noSinglePartyCanRewriteTheBook` |
 | I10a | 過戶代理不能自行發行：發行需要申購人的授權，只有申購人自己簽的 `SubscriptionRequest` 帶得到；並且會消耗申購人鎖定的現金，份數由帳冊按 NAV 計算 | `RecordIssuance` 的 controller 是過戶代理＋申購人 | 同上 |
 | I10b | 註銷份數需要過戶代理＋託管機構，且付款額必須為正（負數會虛增儲備覆蓋） | `RecordRedemption` 的 controller | 同上 |
-| I11 | 監理看得到的所有份數（含託管中）＝帳冊流通量 | 由監理端對帳；見 §6 | 幾乎每個情境結尾的 `checkReconciles` |
+| I10c | 帳冊之外不可能出現份數：每份份數合約都要託管機構簽署，而託管機構只在帳冊的發行、以及已在帳冊上的份數移動時簽 | `FundHolding` 與所有份數託管合約的 signatory | 同上 |
+| I11 | 監理看得到的所有份數（含託管中）＝帳冊流通量 | 由 I10a–I10c 保證；監理端也能對帳 | 幾乎每個情境結尾的 `checkReconciles` |
 | I12 | 條款修訂後，舊條款立即失效 | 封存舊合約 | `amendedTermsSupersedeOldOnes` |
+| I13 | 儲備數字等於託管機構申報的持倉市值總和，不能另填 | `Attest` 由持倉計算 | `reserveIsTheSumOfPositions` |
+| I14 | 投資組合違反 Rule 2a-7 限制（WAM、WAL、最長到期、每日／每週流動資產、政府資產占比）時，停止新申購；違規項目公開；贖回不受影響 | `Attest` 記錄 `portfolioBreaches`，`RecordIssuance` 要求為空 | `breachingPortfolioStopsSubscriptionsOnly`、`eachLimitIsEnforced`、`metricsFollowRule2a7Definitions` |
 
 ## 5. 設計取捨
 
@@ -90,6 +94,23 @@ Canton 3.x 不支援 contract key 的唯一性查詢。所以每個 choice 都�
 - 它**消耗**申購人的 `LockedCash`（付給託管機構），現金是真的，而且只能算一次。
 - 份數由帳冊用當下 NAV 計算並回傳，呼叫者不能指定。
 - 資格檢查、最低申購額、儲備覆蓋都在這裡做。帳冊是發行唯一的關卡。
+
+### 為什麼託管機構要共簽每一份持有部位
+只靠帳冊雙簽，還有一個洞：持有部位原本只由「過戶代理＋持有人」簽署，當持有人就是過戶代理自己時，它一個人就能建立份數，完全不經過帳冊。
+
+現在每份份數合約（持有部位，以及託管中的轉讓、賣單、成交、贖回）都多了託管機構這位 signatory。託管機構的授權只會出現在兩個地方：
+- 帳冊的 `RecordIssuance`：帳冊由託管機構共簽，所以發行時可以直接在這裡建立持有部位；
+- 已經在帳冊上的份數移動：這些託管合約本身就有託管機構的簽名。
+
+所以份數總量只能經由帳冊增加；要在帳冊外變出份數，必須過戶代理和託管機構串通。代價是隱私：託管機構的 participant 看得到所有持有人。
+
+### 為什麼儲備聲明要附持倉明細
+早期版本只有一個「儲備總值」數字。現在託管機構申報的是持倉清單（證券代號、種類、面額、市值、到期日、利率重設日），帳本：
+- 以市值總和作為儲備，申報者無法另填一個不一致的數字；
+- 依基金條款的 `portfolioRules`（預設是政府貨幣基金的 Rule 2a-7 限制）計算 WAM、WAL、最長到期、每日／每週流動資產與政府資產占比；
+- 有違規時照樣記錄並公開（隱藏更糟），但停止新申購，直到託管機構申報合規的組合。
+
+營業日以日曆日近似；指標定義是撰寫者對 Rule 2a-7 的整理，引用前請對照 17 CFR 270.2a-7 原文。
 
 ### 為什麼 NAV 是累積型
 貨幣基金有兩種做法。
@@ -115,9 +136,8 @@ Canton 3.x 的 Smart Contract Upgrade 要求上帳本的 package 乾淨；測試
 
 ## 6. 已知的信任假設
 
-- **過戶代理可以建立「自己持有」的份數而不經過帳冊。** 持有部位的 signatory 是過戶代理和持有人；當持有人就是過戶代理自己時，它一個人就能建立。
-  模型擋不住這件事，靠的是監理機關看得到所有持有部位，持續把總數和帳冊對帳（`checkReconciles` 示範這個對帳）。
-- **託管機構申報的儲備數字靠託管機構誠實。** 正式環境應加上獨立稽核師的定期確信報告。
+- **過戶代理和託管機構串通，可以在帳冊外建立份數。** 兩者都是受監理機構，帳冊本來就由它們共管；監理機關看得到所有持有部位，可以持續對帳（`checkReconciles` 示範）。
+- **託管機構申報的持倉靠託管機構誠實。** 正式環境應加上獨立稽核師的定期確信報告。
 - **NAV 靠基金行政誠實。** 帳本只檢查 NAV 是否新鮮，不檢查它算得對不對。
 
 ## 測試與突變測試

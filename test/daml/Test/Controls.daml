@@ -1,13 +1,13 @@
 -- | Who can and cannot act alone, plus the housekeeping choices.
 module Test.Controls where
 
+import DA.Date (toDateUTC)
 import Daml.Script
 
 import Test.Setup
 import Zuecan.Cash
 import Zuecan.Compliance
-import Zuecan.Fund
-import Zuecan.Holding
+import Zuecan.Registry
 import Zuecan.Types
 
 -- | Neither the transfer agent nor the custodian can rewrite the register on
@@ -40,15 +40,28 @@ noSinglePartyCanRewriteTheBook = do
   expectFailureAs "a redemption must pay out cash" (actAs [w.p.ta, w.p.custodian]) do
     exerciseCmd w.registerCid RecordRedemption with units = 1.0, cashOut = -1000.0, termsCid = w.termsCid, navCid = w.navCid
   -- Only the custodian attests to reserves.
+  today <- toDateUTC <$> getTime
   submitMustFail w.p.ta do
-    exerciseCmd w.registerCid Attest with reserveValue = 1.0e9, newStatementRef = "made up"
+    exerciseCmd w.registerCid Attest with
+      positions = treasuryPortfolio today 1.0e9, newStatementRef = "made up", termsCid = w.termsCid
   -- A register needs the custodian's acceptance to exist at all.
   now <- getTime
   submitMustFail w.p.ta do
     createCmd FundRegister with
-      instrument = w.instrument, custodian = w.p.custodian, readers = []
-      outstanding = 0.0, attestedReserve = 1.0e9, attestedAt = now
-      attestationSeq = 0, statementRef = "forged", netFlowSinceAttestation = 0.0, status = Open
+      instrument = w.instrument, custodian = w.p.custodian, regulator = w.p.regulator, readers = []
+      outstanding = 0.0, attestedReserve = 1.0e9, attestedAt = now, attestationSeq = 0
+      statementRef = "forged", portfolioBreaches = [], netFlowSinceAttestation = 0.0, status = Open
+  -- No party, the transfer agent included, can create units outside the
+  -- register: a holding needs the custodian's signature, which only the
+  -- register's issuance and the escrows of units already on it carry.
+  submitMustFail w.p.ta do
+    createCmd FundHolding with
+      instrument = w.instrument, custodian = w.p.custodian, owner = w.p.ta
+      units = 1000000.0, frozen = False, regulator = w.p.regulator
+  submitMustFail w.p.alice do
+    createCmd FundHolding with
+      instrument = w.instrument, custodian = w.p.custodian, owner = w.p.alice
+      units = 1000000.0, frozen = False, regulator = w.p.regulator
   checkReconciles w
 
 -- | Split, merge, unfreeze and the cash and onboarding odds and ends.

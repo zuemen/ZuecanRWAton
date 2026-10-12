@@ -1,0 +1,54 @@
+-- | Every scenario, one after another, in a single script.
+--
+--   `daml script --all` runs scripts concurrently. On a real participant with
+--   static time they share one clock, so one scenario's passTime breaks
+--   another's deadlines. Running them in sequence from one script avoids
+--   that; freshParty keeps their parties apart. scripts/daml-test.sh checks
+--   that this list names every scenario.
+module Test.Canton where
+
+import DA.Foldable (forA_)
+import Daml.Script
+
+import qualified Test.Controls
+import qualified Test.Portfolio
+import qualified Test.Primary
+import qualified Test.Secondary
+
+scenarios : [(Text, Script ())]
+scenarios =
+  [ ("Controls.housekeeping", Test.Controls.housekeeping)
+  , ("Controls.noSinglePartyCanRewriteTheBook", Test.Controls.noSinglePartyCanRewriteTheBook)
+  , ("Portfolio.breachingPortfolioStopsSubscriptionsOnly", Test.Portfolio.breachingPortfolioStopsSubscriptionsOnly)
+  , ("Portfolio.eachLimitIsEnforced", Test.Portfolio.eachLimitIsEnforced)
+  , ("Portfolio.metricsFollowRule2a7Definitions", Test.Portfolio.metricsFollowRule2a7Definitions)
+  , ("Portfolio.reserveIsTheSumOfPositions", Test.Portfolio.reserveIsTheSumOfPositions)
+  , ("Primary.amendedTermsSupersedeOldOnes", Test.Primary.amendedTermsSupersedeOldOnes)
+  , ("Primary.custodianAttestationBacksIssuance", Test.Primary.custodianAttestationBacksIssuance)
+  , ("Primary.expiredCredentialIsRefused", Test.Primary.expiredCredentialIsRefused)
+  , ("Primary.fundStatusGatesFlows", Test.Primary.fundStatusGatesFlows)
+  , ("Primary.ineligibleInvestorsCannotSubscribe", Test.Primary.ineligibleInvestorsCannotSubscribe)
+  , ("Primary.redeemerMustBeScreened", Test.Primary.redeemerMustBeScreened)
+  , ("Primary.redemptionPaysAtNavAndRetiresUnits", Test.Primary.redemptionPaysAtNavAndRetiresUnits)
+  , ("Primary.staleAttestationOrForeignNavBlocksRedemption", Test.Primary.staleAttestationOrForeignNavBlocksRedemption)
+  , ("Primary.staleAttestationOrNavBlocksIssuance", Test.Primary.staleAttestationOrNavBlocksIssuance)
+  , ("Primary.staleScreeningMustBeRedone", Test.Primary.staleScreeningMustBeRedone)
+  , ("Primary.subscriptionCashIsNeverStuck", Test.Primary.subscriptionCashIsNeverStuck)
+  , ("Primary.subscriptionIssuesUnitsAtNav", Test.Primary.subscriptionIssuesUnitsAtNav)
+  , ("Primary.underReservedFundStopsIssuingAndRedeeming", Test.Primary.underReservedFundStopsIssuingAndRedeeming)
+  , ("Secondary.counterpartiesCanWalkAwayAfterTheDeadline", Test.Secondary.counterpartiesCanWalkAwayAfterTheDeadline)
+  , ("Secondary.freezeAndSeizeUnderLegalOrder", Test.Secondary.freezeAndSeizeUnderLegalOrder)
+  , ("Secondary.haltsStopSettlement", Test.Secondary.haltsStopSettlement)
+  , ("Secondary.ineligibleBuyerCannotReceiveUnits", Test.Secondary.ineligibleBuyerCannotReceiveUnits)
+  , ("Secondary.priceBandAndSizeCap", Test.Secondary.priceBandAndSizeCap)
+  , ("Secondary.privacyOfHoldings", Test.Secondary.privacyOfHoldings)
+  , ("Secondary.rfqTradeSettlesDeliveryVersusPayment", Test.Secondary.rfqTradeSettlesDeliveryVersusPayment)
+  , ("Secondary.sanctionedSellerIsNotPaid", Test.Secondary.sanctionedSellerIsNotPaid)
+  , ("Secondary.takeRequiresAMatchingLock", Test.Secondary.takeRequiresAMatchingLock)
+  , ("Secondary.transfersNeedAnEligibleReceiver", Test.Secondary.transfersNeedAnEligibleReceiver)
+  ]
+
+allScenarios : Script ()
+allScenarios = forA_ scenarios \(name, scenario) -> do
+  debug ("running " <> name)
+  scenario

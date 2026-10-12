@@ -25,22 +25,22 @@ IMAGE = os.environ.get("DAML_IMAGE", "digitalasset/daml-sdk:3.4.0-rc2")
 
 # (name, module under main/daml/Zuecan, original text, mutated text)
 MUTANTS = [
- ("issuance coverage", "Fund", "(liability next nav.navPerUnit <= coverage next)", "True"),
- ("redemption coverage", "Fund", "(liability this nav.navPerUnit <= coverage this)", "True"),
- ("issuance attestation freshness", "Fund", "(isWithin terms.maxAttestationAge now attestedAt)\n        lc <- fetch", "True\n        lc <- fetch"),
- ("redemption attestation freshness", "Fund", "(isWithin terms.maxAttestationAge now attestedAt)\n        assertMsg \"cannot redeem", "True\n        assertMsg \"cannot redeem"),
+ ("issuance coverage", "Registry", "(liability next nav.navPerUnit <= coverage next)", "True"),
+ ("redemption coverage", "Registry", "(liability this nav.navPerUnit <= coverage this)", "True"),
+ ("issuance attestation freshness", "Registry", "(isWithin terms.maxAttestationAge now attestedAt)\n        assertMsg (\"the portfolio", "True\n        assertMsg (\"the portfolio"),
+ ("redemption attestation freshness", "Registry", "(isWithin terms.maxAttestationAge now attestedAt)\n        assertMsg \"cannot redeem", "True\n        assertMsg \"cannot redeem"),
  ("nav freshness", "Fund", "(isWithin terms.maxNavAge now nav.asOf)", "True"),
  ("nav agent identity", "Fund", "(nav.navAgent == terms.navAgent)", "True"),
- ("register dual control", "Fund", "signatory instrument.registrar, custodian\n    observer readers", "signatory instrument.registrar\n    observer custodian, readers"),
- ("issuance needs subscriber", "Fund", "controller instrument.registrar, subscriber", "controller instrument.registrar"),
- ("redemption needs custodian", "Fund", "controller instrument.registrar, custodian", "controller instrument.registrar"),
- ("redemption pays cash", "Fund", "(cashOut > 0.0)", "True"),
- ("issuance eligibility", "Fund", "checkEligible terms.compliance subscriber terms.eligibility now cred", "pure ()"),
- ("issuance escrow match", "Fund", "lc.payee == custodian", "True"),
- ("issuance minimum", "Fund", "(lc.amount >= terms.minSubscription)", "True"),
- ("issuance status", "Fund", "(status == Open)", "True"),
- ("redemption status", "Fund", "(status /= Suspended)", "True"),
- ("unit rounding down", "Fund", "floor6 (lc.amount / nav.navPerUnit)", "(lc.amount / nav.navPerUnit)"),
+ ("register dual control", "Registry", "signatory instrument.registrar, custodian\n    observer regulator, readers", "signatory instrument.registrar\n    observer custodian, regulator, readers"),
+ ("issuance needs subscriber", "Registry", "controller instrument.registrar, subscriber", "controller instrument.registrar"),
+ ("redemption needs custodian", "Registry", "controller instrument.registrar, custodian", "controller instrument.registrar"),
+ ("redemption pays cash", "Registry", "(cashOut > 0.0)", "True"),
+ ("issuance eligibility", "Registry", "checkEligible terms.compliance subscriber terms.eligibility now cred", "pure ()"),
+ ("issuance escrow match", "Registry", "lc.payee == custodian", "True"),
+ ("issuance minimum", "Registry", "(lc.amount >= terms.minSubscription)", "True"),
+ ("issuance status", "Registry", "(status == Open)", "True"),
+ ("redemption status", "Registry", "(status /= Suspended)", "True"),
+ ("unit rounding down", "Registry", "floor6 (lc.amount / nav.navPerUnit)", "(lc.amount / nav.navPerUnit)"),
  ("terms version bump", "Fund", "(newTerms.version == version + 1)", "True"),
  ("investor class", "Compliance", "(cred.investorClass `elem` eligibility.allowedClasses)", "True"),
  ("jurisdiction", "Compliance", "(cred.jurisdiction `elem` eligibility.allowedJurisdictions)", "True"),
@@ -52,24 +52,36 @@ MUTANTS = [
  ("payout needs owner", "Cash", "controller lockedTo, owner", "controller lockedTo"),
  ("reclaim after lapse", "Cash", "(now >= releaseAfter)", "True"),
  ("cash transfer bound", "Cash", "(transferAmount > 0.0 && transferAmount <= amount)", "True"),
- ("price band", "Holding", "(bpsDeviation nav.navPerUnit price <= market.maxDeviationBps)", "True"),
- ("market halted", "Holding", "(market.status == Trading)", "True"),
- ("size cap", "Holding", "(units <= market.maxTradeUnits)", "True"),
- ("take lock match", "Holding", "&& lc.issuer == cashIssuer && lc.currency == currency && lc.amount == notional)", ")"),
- ("lock lapses at deadline", "Holding", "(lc.releaseAfter == deadline)", "True"),
- ("order expiry", "Holding", "(now < expiresAt)", "True"),
- ("settle deadline", "Holding", "(now < deadline)", "True"),
- ("abort deadline", "Holding", "(now >= deadline)", "True"),
- ("abort actor", "Holding", "(actor == seller || actor == buyer)", "True"),
- ("transfer receiver eligibility", "Holding", "checkEligible terms.compliance receiver terms.eligibility now cred", "pure ()"),
- ("buyer eligibility", "Holding", "checkEligible terms.compliance buyer terms.eligibility now buyerCred", "pure ()"),
- ("seller screening", "Holding", "checkScreened terms.compliance seller terms.eligibility now sellerCred", "pure ()"),
- ("frozen escrow", "Holding", "assertMsg \"the holding is frozen\" (not h.frozen)", "pure ()"),
- ("min redemption", "Holding", "(units >= terms.minRedemptionUnits)", "True"),
- ("redeemer screening", "Holding", "checkScreened terms.compliance investor terms.eligibility now cred", "pure ()"),
- ("holding dual signature", "Holding", "signatory instrument.registrar, owner\n    observer regulator", "signatory instrument.registrar\n    observer owner, regulator"),
+ ("price band", "Registry", "(bpsDeviation nav.navPerUnit price <= market.maxDeviationBps)", "True"),
+ ("market halted", "Registry", "(market.status == Trading)", "True"),
+ ("size cap", "Registry", "(units <= market.maxTradeUnits)", "True"),
+ ("take lock match", "Registry", "&& lc.issuer == cashIssuer && lc.currency == currency && lc.amount == notional)", ")"),
+ ("lock lapses at deadline", "Registry", "(lc.releaseAfter == deadline)", "True"),
+ ("order expiry", "Registry", "(now < expiresAt)", "True"),
+ ("settle deadline", "Registry", "(now < deadline)", "True"),
+ ("abort deadline", "Registry", "(now >= deadline)", "True"),
+ ("abort actor", "Registry", "(actor == seller || actor == buyer)", "True"),
+ ("transfer receiver eligibility", "Registry", "checkEligible terms.compliance receiver terms.eligibility now cred", "pure ()"),
+ ("buyer eligibility", "Registry", "checkEligible terms.compliance buyer terms.eligibility now buyerCred", "pure ()"),
+ ("seller screening", "Registry", "checkScreened terms.compliance seller terms.eligibility now sellerCred", "pure ()"),
+ ("frozen escrow", "Registry", "assertMsg \"the holding is frozen\" (not h.frozen)", "pure ()"),
+ ("min redemption", "Registry", "(units >= terms.minRedemptionUnits)", "True"),
+ ("redeemer screening", "Registry", "checkScreened terms.compliance investor terms.eligibility now cred", "pure ()"),
+ ("holding dual signature", "Registry", "signatory instrument.registrar, custodian, owner\n    observer regulator", "signatory instrument.registrar, custodian\n    observer owner, regulator"),
  ("regulator halt lock", "Market", "HaltedByRegulator _ -> abort \"only the regulator can lift a regulatory halt\"", "HaltedByRegulator _ -> create this with status = Trading"),
  ("operator cannot override halt", "Market", "HaltedByRegulator _ -> abort \"the regulator has halted this market\"", "HaltedByRegulator _ -> create this with status = HaltedByOperator reason"),
+ ("holding custodian signature", "Registry", "signatory instrument.registrar, custodian, owner\n    observer regulator", "signatory instrument.registrar, owner\n    observer custodian, regulator"),
+ ("reserve is sum of positions", "Registry", "attestedReserve = metrics.value", "attestedReserve = metrics.value * 2.0"),
+ ("portfolio breach gate", "Registry", "(null portfolioBreaches)\n        lc <- fetch", "True\n        lc <- fetch"),
+ ("wam limit", "Portfolio", "| m.wamDays > intToDecimal rules.maxWamDays ]", "| False ]"),
+ ("wal limit", "Portfolio", "| m.walDays > intToDecimal rules.maxWalDays ]", "| False ]"),
+ ("maturity limit", "Portfolio", "| m.longestMaturityDays > rules.maxMaturityDays ]", "| False ]"),
+ ("daily liquidity limit", "Portfolio", "| m.dailyLiquidBps < intToDecimal rules.minDailyLiquidBps ]", "| False ]"),
+ ("weekly liquidity limit", "Portfolio", "| m.weeklyLiquidBps < intToDecimal rules.minWeeklyLiquidBps ]", "| False ]"),
+ ("government share limit", "Portfolio", "| m.governmentBps < intToDecimal rules.minGovernmentBps ]", "| False ]"),
+ ("non-positive value", "Portfolio", "| any (\\p -> p.marketValue <= 0.0 || p.par <= 0.0) positions ]", "| False ]"),
+ ("wam reset look-through", "Portfolio", "days (min p.maturity (fromOptional p.maturity p.resetDate))", "days p.maturity"),
+ ("agency notes weekly liquid", "Portfolio", "|| (p.kind == AgencyDiscountNote && maturityDays p <= 60)", ""),
  ("request matches escrow", "Subscription", "(lc.amount == cashAmount)", "True"),
 ]
 
@@ -101,9 +113,18 @@ def run(mutant):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("-j", "--jobs", type=int, default=3)
+    ap.add_argument("--check", action="store_true",
+                    help="only check that every mutant's original text is still in the sources")
     ap.add_argument("names", nargs="*", help="only run mutants with these names")
     args = ap.parse_args()
     todo = [m for m in MUTANTS if not args.names or m[0] in args.names]
+    if args.check:
+        stale = [name for name, module, old, _ in todo
+                 if old not in open(os.path.join(REPO, "main/daml/Zuecan", module + ".daml")).read()]
+        for name in stale:
+            print(f"pattern missing: {name}")
+        print(f"{len(todo) - len(stale)}/{len(todo)} mutant patterns found")
+        sys.exit(1 if stale else 0)
     failed = []
     with ThreadPoolExecutor(max_workers=args.jobs) as pool:
         for name, verdict, detail in pool.map(run, todo):

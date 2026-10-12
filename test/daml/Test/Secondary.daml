@@ -9,7 +9,7 @@ import Test.Setup
 import Zuecan.Cash
 import Zuecan.Compliance
 import Zuecan.Fund
-import Zuecan.Holding
+import Zuecan.Registry
 import Zuecan.Market
 import Zuecan.Types
 
@@ -223,7 +223,7 @@ freezeAndSeizeUnderLegalOrder = do
       buyer = w.p.bob, operator = w.p.operator, amount = 1000.0, price = 1.0430
       cashIssuer = w.p.usd, currency = "USD", expiresAt = addRelTime now (hours 1), settleWithin = hours 1
   expectFailure "the holding is frozen" w.p.alice do
-    exerciseCmd frozen RequestRedemption with custodian = w.p.custodian, amount = 1000.0
+    exerciseCmd frozen RequestRedemption with amount = 1000.0
   seized <- submit w.p.ta do exerciseCmd frozen Seize with legalOrderRef = "court order 2026-TPE-001 (turnover)"
   Some s <- queryContractId w.p.ta seized
   assertMsg "the units moved to the transfer agent" (s.owner == w.p.ta && s.frozen)
@@ -247,6 +247,10 @@ privacyOfHoldings = do
   assertMsg "the venue sees no holdings" (null operatorHoldings)
   regulatorHoldings <- query @FundHolding w.p.regulator
   assertMsg "the regulator sees all of them" (length regulatorHoldings == 2)
+  -- The custodian co-signs every unit contract, so it sees the register of
+  -- holders too (the price of making units impossible to create off-book).
+  custodianHoldings <- query @FundHolding w.p.custodian
+  assertMsg "so does the custodian" (length custodianHoldings == 2)
   publicRegister <- query @FundRegister w.p.public
   publicNav <- query @NavReport w.p.public
   publicReserves <- query @ReserveAttestation w.p.public

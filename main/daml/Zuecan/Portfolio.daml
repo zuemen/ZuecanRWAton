@@ -1,0 +1,121 @@
+-- | The fund's portfolio as the custodian reports it, and the money-market
+--   fund limits the ledger checks against it.
+--
+--   The limits mirror SEC Rule 2a-7 for a government money-market fund as
+--   amended in 2023 (weighted average maturity, weighted average life, maximum
+--   remaining maturity, daily and weekly liquid assets, share of government
+--   assets). They are parameters in the fund's terms, so a fund under a
+--   different regime can set its own. Business days are approximated by
+--   calendar days.
+module Zuecan.Portfolio
+  ( AssetKind (..)
+  , Position (..)
+  , PortfolioRules (..)
+  , PortfolioMetrics (..)
+  , governmentMmfRules
+  , portfolioValue
+  , measure
+  , breaches
+  ) where
+
+import DA.Date (subDate)
+import DA.Optional (fromOptional)
+
+data AssetKind
+  = Cash                -- ^ cash at the custodian
+  | TreasuryBill        -- ^ direct obligation of the US government
+  | AgencyDiscountNote  -- ^ US government agency discount note
+  | GovernmentRepo      -- ^ repo fully collateralized by government securities
+  | OtherSecurity       -- ^ anything else; counts against the government share
+  deriving (Eq, Show)
+
+data Position = Position
+  with
+    securityId : Text           -- ^ CUSIP, or an account id for cash
+    kind : AssetKind
+    par : Decimal
+    marketValue : Decimal
+    maturity : Date             -- ^ final maturity (for cash: the statement date)
+    resetDate : Optional Date   -- ^ next interest-rate reset, for floating-rate paper
+  deriving (Eq, Show)
+
+data PortfolioRules = PortfolioRules
+  with
+    maxWamDays : Int
+    maxWalDays : Int
+    maxMaturityDays : Int
+    minDailyLiquidBps : Int
+    minWeeklyLiquidBps : Int
+    minGovernmentBps : Int
+  deriving (Eq, Show)
+
+data PortfolioMetrics = PortfolioMetrics
+  with
+    value : Decimal
+    wamDays : Decimal
+    walDays : Decimal
+    longestMaturityDays : Int
+    dailyLiquidBps : Decimal
+    weeklyLiquidBps : Decimal
+    governmentBps : Decimal
+  deriving (Eq, Show)
+
+-- | Rule 2a-7 limits for a government money-market fund (2023 amendments).
+governmentMmfRules : PortfolioRules
+governmentMmfRules = PortfolioRules with
+  maxWamDays = 60
+  maxWalDays = 120
+  maxMaturityDays = 397
+  minDailyLiquidBps = 2500
+  minWeeklyLiquidBps = 5000
+  minGovernmentBps = 9950
+
+portfolioValue : [Position] -> Decimal
+portfolioValue = sum . map (\p -> p.marketValue)
+
+-- | Measure a portfolio as of `today`. An empty portfolio measures as all
+--   zeros; `breaches` treats it as compliant (the fund holds nothing yet).
+measure : Date -> [Position] -> PortfolioMetrics
+measure today positions =
+  let value = portfolioValue positions
+      days d = max 0 (subDate d today)
+      weighted f = sum [p.marketValue * intToDecimal (f p) | p <- positions]
+      share pred = sum [p.marketValue | p <- positions, pred p]
+      bps x = if value == 0.0 then 0.0 else x / value * 10000.0
+      avg x = if value == 0.0 then 0.0 else x / value
+      maturityDays p = days p.maturity
+      -- WAM looks through to the next rate reset; WAL does not.
+      wamDays p = days (min p.maturity (fromOptional p.maturity p.resetDate))
+      directGovernment p = p.kind == Cash || p.kind == TreasuryBill
+      dailyLiquid p = directGovernment p || maturityDays p <= 1
+      weeklyLiquid p = directGovernment p || maturityDays p <= 5
+        || (p.kind == AgencyDiscountNote && maturityDays p <= 60)
+      government p = p.kind /= OtherSecurity
+  in PortfolioMetrics with
+       value
+       wamDays = avg (weighted wamDays)
+       walDays = avg (weighted maturityDays)
+       longestMaturityDays = foldl max 0 (map maturityDays positions)
+       dailyLiquidBps = bps (share dailyLiquid)
+       weeklyLiquidBps = bps (share weeklyLiquid)
+       governmentBps = bps (share government)
+
+-- | Which limits the portfolio breaks; empty means compliant.
+breaches : PortfolioRules -> [Position] -> PortfolioMetrics -> [Text]
+breaches rules positions m
+  | null positions = []
+  | otherwise =
+      [ "weighted average maturity " <> show m.wamDays <> " days exceeds " <> show rules.maxWamDays
+      | m.wamDays > intToDecimal rules.maxWamDays ] ++
+      [ "weighted average life " <> show m.walDays <> " days exceeds " <> show rules.maxWalDays
+      | m.walDays > intToDecimal rules.maxWalDays ] ++
+      [ "a security matures in " <> show m.longestMaturityDays <> " days, beyond " <> show rules.maxMaturityDays
+      | m.longestMaturityDays > rules.maxMaturityDays ] ++
+      [ "daily liquid assets " <> show m.dailyLiquidBps <> " bp below " <> show rules.minDailyLiquidBps
+      | m.dailyLiquidBps < intToDecimal rules.minDailyLiquidBps ] ++
+      [ "weekly liquid assets " <> show m.weeklyLiquidBps <> " bp below " <> show rules.minWeeklyLiquidBps
+      | m.weeklyLiquidBps < intToDecimal rules.minWeeklyLiquidBps ] ++
+      [ "government assets " <> show m.governmentBps <> " bp below " <> show rules.minGovernmentBps
+      | m.governmentBps < intToDecimal rules.minGovernmentBps ] ++
+      [ "a position has a non-positive market value"
+      | any (\p -> p.marketValue <= 0.0 || p.par <= 0.0) positions ]

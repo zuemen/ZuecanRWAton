@@ -1,9 +1,9 @@
 name: Daml
 
-# Build both packages and run every Daml Script scenario. The SDK comes from the
-# official Docker image pinned by digest (3.4 stable is only published through
-# dpm). Fails if any scenario fails, or if a choice other than the built-in
-# Archive is never exercised by a test.
+# Build both packages and run every Daml Script scenario twice: on the IDE
+# ledger (fast, with a coverage gate) and on a real Canton sandbox participant
+# over the Ledger API. The SDK comes from the official Docker image pinned by
+# digest (3.4 stable is only published through dpm).
 on:
   push:
   pull_request:
@@ -34,3 +34,23 @@ jobs:
 
       - name: Build and test
         run: scripts/daml-test.sh
+
+      # The full mutation run takes ~20 minutes; CI only checks that every
+      # mutant still applies, so the list cannot rot as the code changes.
+      - name: Mutation list is current
+        run: python3 scripts/mutation_test.py --check
+
+  canton:
+    name: scenarios on a Canton participant
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Pull the Daml SDK image
+        run: docker pull "$DAML_IMAGE"
+
+      - name: Run every scenario against a Canton sandbox
+        run: scripts/canton-test.sh

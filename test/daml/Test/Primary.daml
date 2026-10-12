@@ -8,7 +8,7 @@ import Test.Setup
 import Zuecan.Cash
 import Zuecan.Compliance
 import Zuecan.Fund
-import Zuecan.Holding
+import Zuecan.Registry
 import Zuecan.Subscription
 import Zuecan.Types
 
@@ -65,7 +65,7 @@ underReservedFundStopsIssuingAndRedeeming = do
 
   -- Alice tries to leave first at the old NAV.
   (redeemReq, _) <- submit w.p.alice do
-    exerciseCmd aliceHolding RequestRedemption with custodian = w.p.custodian, amount = 10000.0
+    exerciseCmd aliceHolding RequestRedemption with amount = 10000.0
   payout <- submit w.p.ta do
     exerciseCmd redeemReq ApproveRedemption with termsCid = w.termsCid, navCid = w.navCid, credentialCid = w.aliceCred
   custodianCash <- largestCash w.p.custodian
@@ -80,7 +80,7 @@ underReservedFundStopsIssuingAndRedeeming = do
   -- re-approved at the new one.
   (redeemReq, _) <- do
     restored <- submit w.p.ta do exerciseCmd payout CancelPayout with reason = "NAV corrected"
-    submit w.p.alice do exerciseCmd restored RequestRedemption with custodian = w.p.custodian, amount = 10000.0
+    submit w.p.alice do exerciseCmd restored RequestRedemption with amount = 10000.0
   payout <- submit w.p.ta do
     exerciseCmd redeemReq ApproveRedemption with termsCid = w.termsCid, navCid = w.navCid, credentialCid = w.aliceCred
   (_, registerCid) <- submit w.p.custodian do
@@ -120,9 +120,9 @@ staleAttestationOrForeignNavBlocksRedemption = do
   w <- setup
   (holding, w) <- subscribe w w.p.alice w.aliceCred 100000.0
   (req, _) <- submit w.p.alice do
-    exerciseCmd holding RequestRedemption with custodian = w.p.custodian, amount = 1000.0
+    exerciseCmd holding RequestRedemption with amount = 1000.0
   -- A NAV struck by someone other than the fund's administrator.
-  rogue <- allocatePartyByHint (PartyIdHint "RogueAdministrator")
+  rogue <- freshParty "RogueAdministrator"
   now <- getTime
   rogueNav <- submit rogue do
     createCmd NavReport with
@@ -151,7 +151,7 @@ redeemerMustBeScreened = do
   w <- attest w 100000.0 "custodian-statement-q2"
   w <- republishNav w launchNav
   (req, _) <- submit w.p.alice do
-    exerciseCmd holding RequestRedemption with custodian = w.p.custodian, amount = 1000.0
+    exerciseCmd holding RequestRedemption with amount = 1000.0
   expectFailure "sanctions screening is out of date" w.p.ta do
     exerciseCmd req ApproveRedemption with termsCid = w.termsCid, navCid = w.navCid, credentialCid = w.aliceCred
   aliceCred <- submit w.p.compliance do
@@ -174,7 +174,7 @@ ineligibleInvestorsCannotSubscribe = do
   req <- requestSubscription w w.p.dave 50000.0
   expectFailure "credential belongs to a different investor" w.p.ta (settleWith req w.aliceCred)
   -- A credential from some other KYC provider is not one the fund relies on.
-  rogue <- allocatePartyByHint (PartyIdHint "RogueKyc")
+  rogue <- freshParty "RogueKyc"
   roguReq <- submit w.p.dave do
     createCmd CredentialRequest with
       investor = w.p.dave, compliance = rogue, requestedClass = Institutional
@@ -185,7 +185,7 @@ ineligibleInvestorsCannotSubscribe = do
   expectFailure "not issued by the fund's compliance agent" w.p.ta (settleWith req daveCred)
   -- A jurisdiction outside the fund's list.
   ericCred <- do
-    eric <- allocatePartyByHint (PartyIdHint "Eric")
+    eric <- freshParty "Eric"
     onboard w.p eric Accredited "KP"
   Some cred <- queryContractId w.p.ta ericCred
   submit w.p.usd do createCmd CashHolding with issuer = w.p.usd, owner = cred.investor, currency = "USD", amount = 100000.0
@@ -305,7 +305,7 @@ redemptionPaysAtNavAndRetiresUnits = do
   w <- attest w 100010.00 "custodian-statement-day-2"
 
   (redeemReq, Some rest) <- submit w.p.alice do
-    exerciseCmd holding RequestRedemption with custodian = w.p.custodian, amount = 20000.0
+    exerciseCmd holding RequestRedemption with amount = 20000.0
   checkReconciles w
   payout <- submit w.p.ta do
     exerciseCmd redeemReq ApproveRedemption with termsCid = w.termsCid, navCid = w.navCid, credentialCid = w.aliceCred
@@ -323,9 +323,9 @@ redemptionPaysAtNavAndRetiresUnits = do
   checkReconciles w'
 
   -- The investor can withdraw a request; the transfer agent can reject one.
-  (req2, _) <- submit w.p.alice do exerciseCmd rest RequestRedemption with custodian = w.p.custodian, amount = 100.0
+  (req2, _) <- submit w.p.alice do exerciseCmd rest RequestRedemption with amount = 100.0
   restored <- submit w.p.alice do exerciseCmd req2 CancelRedemption
-  (req3, _) <- submit w.p.alice do exerciseCmd restored RequestRedemption with custodian = w.p.custodian, amount = 0.5
+  (req3, _) <- submit w.p.alice do exerciseCmd restored RequestRedemption with amount = 0.5
   expectFailure "below the fund's minimum redemption" w.p.ta do
     exerciseCmd req3 ApproveRedemption with termsCid = w.termsCid, navCid = w.navCid, credentialCid = w.aliceCred
   _ <- submit w.p.ta do exerciseCmd req3 RejectRedemption with reason = "below minimum"
@@ -344,7 +344,7 @@ fundStatusGatesFlows = do
     exerciseCmd req SettleSubscription with
       termsCid = w'.termsCid, registerCid = w'.registerCid, navCid = w'.navCid, credentialCid = w'.bobCred
   (redeemReq, _) <- submit w.p.alice do
-    exerciseCmd holding RequestRedemption with custodian = w.p.custodian, amount = 1000.0
+    exerciseCmd holding RequestRedemption with amount = 1000.0
   payout <- submit w.p.ta do
     exerciseCmd redeemReq ApproveRedemption with termsCid = w'.termsCid, navCid = w'.navCid, credentialCid = w'.aliceCred
   registerCid <- submit w.p.ta do exerciseCmd w'.registerCid SetStatus with newStatus = Suspended

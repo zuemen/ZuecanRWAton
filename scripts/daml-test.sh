@@ -28,4 +28,16 @@ if [ -n "$unexercised" ]; then
   echo "$unexercised"
   exit 1
 fi
+# Test.Canton:allScenarios must list every scenario, or the Canton run
+# (scripts/canton-test.sh) silently skips it.
+missing=""
+for name in $(grep -oE '^daml/Test/[A-Za-z]+\.daml:[A-Za-z0-9]+: ok' "$log" \
+    | sed -E 's#daml/Test/([A-Za-z]+)\.daml:([A-Za-z0-9]+): ok#\1.\2#' \
+    | grep -vE '^(Setup\.|Secondary\.funded$|Canton\.)'); do
+  grep -q "(\"$name\"" test/daml/Test/Canton.daml || missing="$missing $name"
+done
+if [ -n "$missing" ]; then
+  echo "::error::scenarios missing from Test.Canton.scenarios:$missing"
+  exit 1
+fi
 echo "all scenarios passed; every non-Archive choice is exercised"

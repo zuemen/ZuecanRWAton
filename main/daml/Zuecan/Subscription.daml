@@ -12,7 +12,7 @@ module Zuecan.Subscription
 import qualified Zuecan.Cash as Cash
 import Zuecan.Compliance (InvestorCredential)
 import Zuecan.Fund
-import Zuecan.Holding (FundHolding (..))
+import Zuecan.Registry (FundHolding, FundRegister, RecordIssuance (..))
 import Zuecan.Types (InstrumentId (..))
 
 template SubscriptionRequest
@@ -38,13 +38,11 @@ template SubscriptionRequest
         checkTermsFor instrument terms
         lc <- fetch lockedCashCid
         assertMsg "the escrowed cash does not match the request" (lc.amount == cashAmount)
-        -- The register checks eligibility, prices the units, takes the cash
-        -- and enforces reserve coverage; this request supplies the investor's
-        -- authority for it and for the holding.
-        (register, units, custodyCash) <- exercise registerCid RecordIssuance with
+        -- The register checks eligibility, prices the units, takes the cash,
+        -- enforces reserve coverage and portfolio limits, and creates the
+        -- holding; this request supplies the investor's authority for it.
+        (register, holding, custodyCash) <- exercise registerCid RecordIssuance with
           subscriber = investor, lockedCashCid, credentialCid, termsCid, navCid
-        holding <- create FundHolding with
-          instrument, owner = investor, units, frozen = False, regulator = terms.regulator
         pure (holding, register, custodyCash)
 
     choice RejectSubscription : ContractId Cash.CashHolding

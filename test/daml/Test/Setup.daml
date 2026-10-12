@@ -1,6 +1,7 @@
 -- | A fully onboarded test world and the helpers the scenarios share.
 module Test.Setup where
 
+import DA.Date (addDays, toDateUTC)
 import DA.Foldable (forA_)
 import DA.Text (isInfixOf)
 import DA.Time
@@ -9,8 +10,9 @@ import Daml.Script
 import Zuecan.Cash
 import Zuecan.Compliance
 import Zuecan.Fund
-import Zuecan.Holding
+import Zuecan.Registry
 import Zuecan.Market
+import Zuecan.Portfolio
 import Zuecan.Subscription
 import Zuecan.Types
 
@@ -44,9 +46,17 @@ data World = World
 launchNav : Decimal
 launchNav = 1.0425
 
+-- | A party whose id hint is unique on this ledger. On the IDE ledger every
+--   scenario starts empty, but on a real Canton participant all scenarios
+--   share one ledger, and a party id hint can only be used once.
+freshParty : Text -> Script Party
+freshParty hint = do
+  known <- listKnownParties
+  allocatePartyByHint (PartyIdHint (hint <> "-" <> show (length known)))
+
 allocateParties : Script Parties
 allocateParties = do
-  let party hint = allocatePartyByHint (PartyIdHint hint)
+  let party = freshParty
   ta <- party "TransferAgent"
   custodian <- party "Custodian"
   navAgent <- party "FundAdministrator"
@@ -95,6 +105,7 @@ fundTerms p instrument = FundTerms with
     allowedClasses = [Accredited, QualifiedPurchaser, Professional, Institutional]
     allowedJurisdictions = ["US", "TW", "SG"]
     maxScreeningAge = days 90
+  portfolioRules = governmentMmfRules
   minSubscription = 1000.0
   minRedemptionUnits = 1.0
   maxNavAge = hours 30
@@ -120,7 +131,7 @@ setup = do
       methodologyRef = "amortized-cost; T-bills marked daily"
   proposal <- submit p.ta do
     createCmd RegisterProposal with
-      instrument, custodian = p.custodian, readers = [p.regulator, p.public]
+      instrument, custodian = p.custodian, regulator = p.regulator, readers = [p.public]
   registerCid <- submit p.custodian do exerciseCmd proposal AcceptAppointment
   marketCid <- submit p.operator do
     createCmd MarketControl with
@@ -166,11 +177,35 @@ requestSubscription w investor amount = do
     createCmd SubscriptionRequest with
       instrument = w.instrument, investor, cashAmount = amount, lockedCashCid = locked
 
+-- | The custodian reports a compliant portfolio worth `reserveValue`: a
+--   quarter in cash, the rest in 4- and 8-week Treasury bills.
 attest : World -> Decimal -> Text -> Script World
 attest w reserveValue ref = do
+  today <- toDateUTC <$> getTime
+  attestPositions w (treasuryPortfolio today reserveValue) ref
+
+attestPositions : World -> [Position] -> Text -> Script World
+attestPositions w positions ref = do
   (registerCid, _) <- submit w.p.custodian do
-    exerciseCmd w.registerCid Attest with reserveValue, newStatementRef = ref
+    exerciseCmd w.registerCid Attest with positions, newStatementRef = ref, termsCid = w.termsCid
   pure w with registerCid
+
+treasuryPortfolio : Date -> Decimal -> [Position]
+treasuryPortfolio today value
+  | value == 0.0 = []
+  | otherwise =
+      let cash = floor6 (value * 0.25)
+          bill4w = floor6 (value * 0.40)
+          bill8w = value - cash - bill4w
+      in [ position "CASH-USD" Cash cash today
+         , position "912797-4W" TreasuryBill bill4w (addDays today 28)
+         , position "912797-8W" TreasuryBill bill8w (addDays today 56)
+         ]
+
+-- | A fixed-rate position valued at par.
+position : Text -> AssetKind -> Decimal -> Date -> Position
+position securityId kind value maturity =
+  Position with securityId, kind, par = value, marketValue = value, maturity, resetDate = None
 
 republishNav : World -> Decimal -> Script World
 republishNav w nav = do
