@@ -534,7 +534,7 @@ sequenceDiagram
 ### 10.4 突變測試結果
 
 <!-- MUTATION_TABLE -->
-對最終程式碼的完整執行（2026-10-12）：**62／62 全部被抓到**。每一列把一條檢查的條件改成永遠成立、刪除檢查，或拿掉一個 signatory／controller。
+對最終程式碼執行（2026-10-12；75 個在一次完整執行中，補上召回與扣押的測試後再執行新增的 5 個）：**80／80 全部被抓到**。每一列把一條檢查的條件改成永遠成立、刪除檢查、改變一個計算，或拿掉一個 signatory／controller。
 
 | 突變（移除的檢查或授權） | 結果 | 第一個失敗的情境 |
 |---|---|---|
@@ -545,25 +545,29 @@ sequenceDiagram
 | buyer eligibility | 被抓到 | `Secondary.ineligibleBuyerCannotReceiveUnits` |
 | cash transfer bound | 被抓到 | `Controls.housekeeping` |
 | credential expiry | 被抓到 | `Primary.expiredCredentialIsRefused` |
-| credential issuer | 被抓到 | `Primary.ineligibleInvestorsCannotSubscribe` |
-| credential owner | 被抓到 | `Primary.ineligibleInvestorsCannotSubscribe` |
+| credential issuer | 被抓到 | `Adversarial.escrowedUnitsCanBeRecalled` |
+| credential owner | 被抓到 | `Adversarial.sanctionedRedeemerIsNotPaid` |
 | daily liquidity limit | 被抓到 | `Portfolio.eachLimitIsEnforced` |
 | first terms version | 被抓到 | `Primary.amendedTermsSupersedeOldOnes` |
 | frozen escrow | 被抓到 | `Secondary.freezeAndSeizeUnderLegalOrder` |
+| gift sender screening | 被抓到 | `Adversarial.escrowedUnitsCanBeRecalled` |
 | government share limit | 被抓到 | `Portfolio.eachLimitIsEnforced` |
-| holding custodian signature | 被抓到 | `Controls.noSinglePartyCanRewriteTheBook` |
+| holding custodian signature | 被抓到 | `Adversarial.oneLockBacksOneTrade` |
 | holding dual signature | 被抓到 | `Controls.noSinglePartyCanRewriteTheBook` |
 | investor class | 被抓到 | `Primary.ineligibleInvestorsCannotSubscribe` |
+| investor reclaim waits for payBy | 被抓到 | `Adversarial.unpaidRedemptionLapsesToTheInvestor` |
 | issuance attestation freshness | 被抓到 | `Primary.staleAttestationOrNavBlocksIssuance` |
 | issuance coverage | 被抓到 | `Primary.underReservedFundStopsIssuingAndRedeeming` |
 | issuance eligibility | 被抓到 | `Primary.staleScreeningMustBeRedone` |
 | issuance escrow match | 被抓到 | `Primary.ineligibleInvestorsCannotSubscribe` |
 | issuance minimum | 被抓到 | `Primary.amendedTermsSupersedeOldOnes` |
-| issuance needs subscriber | 被抓到 | `Controls.housekeeping` |
+| issuance needs subscriber | 被抓到 | `Adversarial.oneLockBacksOneTrade` |
 | issuance status | 被抓到 | `Primary.fundStatusGatesFlows` |
 | jurisdiction | 被抓到 | `Primary.ineligibleInvestorsCannotSubscribe` |
+| lock commits once | 被抓到 | `Adversarial.oneLockBacksOneTrade` |
 | lock lapses at deadline | 被抓到 | `Secondary.takeRequiresAMatchingLock` |
-| market halted | 被抓到 | `Secondary.haltsStopSettlement` |
+| market halted | 被抓到 | `Adversarial.venueCannotEscapeTheRegulator` |
+| market regulator co-sign | 被抓到 | `Adversarial.venueCannotEscapeTheRegulator` |
 | maturity limit | 被抓到 | `Portfolio.eachLimitIsEnforced` |
 | min redemption | 被抓到 | `Primary.redemptionPaysAtNavAndRetiresUnits` |
 | nav agent identity | 被抓到 | `Primary.staleAttestationOrForeignNavBlocksRedemption` |
@@ -572,9 +576,19 @@ sequenceDiagram
 | operator cannot override halt | 被抓到 | `Secondary.haltsStopSettlement` |
 | order expiry | 被抓到 | `Secondary.takeRequiresAMatchingLock` |
 | payout before lapse | 被抓到 | `Primary.subscriptionCashIsNeverStuck` |
+| payout from custodian cash | 被抓到 | `Adversarial.redemptionIsPaidFromCustodyCash` |
+| payout lapses | 被抓到 | `Adversarial.unpaidRedemptionLapsesToTheInvestor` |
+| payout nav is current | 被抓到 | `Adversarial.stalePricedPayoutIsRefused` |
 | payout needs owner | 被抓到 | `Primary.subscriptionCashIsNeverStuck` |
+| payout screening | 被抓到 | `Adversarial.sanctionedRedeemerIsNotPaid` |
 | portfolio breach gate | 被抓到 | `Portfolio.breachingPortfolioStopsSubscriptionsOnly` |
 | price band | 被抓到 | `Secondary.priceBandAndSizeCap` |
+| recall needs a legal order | 被抓到 | `Adversarial.escrowedUnitsCanBeRecalled` |
+| recall order needs a legal order | 被抓到 | `Adversarial.escrowedUnitsCanBeRecalled` |
+| recall payout needs a legal order | 被抓到 | `Adversarial.escrowedUnitsCanBeRecalled` |
+| recall redemption needs a legal order | 被抓到 | `Adversarial.escrowedUnitsCanBeRecalled` |
+| recall trade needs a legal order | 被抓到 | `Adversarial.escrowedUnitsCanBeRecalled` |
+| recalled units are frozen | 被抓到 | `Adversarial.escrowedUnitsCanBeRecalled` |
 | reclaim after lapse | 被抓到 | `Primary.subscriptionCashIsNeverStuck` |
 | redeemer screening | 被抓到 | `Primary.redeemerMustBeScreened` |
 | redemption attestation freshness | 被抓到 | `Primary.staleAttestationOrForeignNavBlocksRedemption` |
@@ -582,20 +596,24 @@ sequenceDiagram
 | redemption needs custodian | 被抓到 | `Controls.noSinglePartyCanRewriteTheBook` |
 | redemption pays cash | 被抓到 | `Controls.noSinglePartyCanRewriteTheBook` |
 | redemption status | 被抓到 | `Primary.fundStatusGatesFlows` |
-| register dual control | 被抓到 | `Controls.housekeeping` |
+| register dual control | 被抓到 | `Adversarial.oneLockBacksOneTrade` |
 | regulator halt lock | 被抓到 | `Secondary.haltsStopSettlement` |
 | request matches escrow | 被抓到 | `Primary.ineligibleInvestorsCannotSubscribe` |
 | reserve is sum of positions | 被抓到 | `Portfolio.reserveIsTheSumOfPositions` |
 | screening age | 被抓到 | `Primary.staleScreeningMustBeRedone` |
+| seize needs a legal order | 被抓到 | `Secondary.freezeAndSeizeUnderLegalOrder` |
 | seller screening | 被抓到 | `Secondary.sanctionedSellerIsNotPaid` |
+| settle checks market regulator | 被抓到 | `Adversarial.venueCannotEscapeTheRegulator` |
 | settle deadline | 被抓到 | `Secondary.counterpartiesCanWalkAwayAfterTheDeadline` |
 | size cap | 被抓到 | `Secondary.priceBandAndSizeCap` |
 | take lock match | 被抓到 | `Secondary.takeRequiresAMatchingLock` |
+| take pledges the lock | 被抓到 | `Adversarial.oneLockBacksOneTrade` |
 | terms keep instrument | 被抓到 | `Primary.amendedTermsSupersedeOldOnes` |
 | terms regulator co-sign | 被抓到 | `Primary.amendedTermsSupersedeOldOnes` |
 | terms version bump | 被抓到 | `Primary.amendedTermsSupersedeOldOnes` |
 | transfer receiver eligibility | 被抓到 | `Secondary.transfersNeedAnEligibleReceiver` |
-| unit rounding down | 被抓到 | `Controls.housekeeping` |
+| unit rounding down | 被抓到 | `Adversarial.oneLockBacksOneTrade` |
+| venue can only tighten limits | 被抓到 | `Adversarial.venueCannotEscapeTheRegulator` |
 | wal limit | 被抓到 | `Portfolio.breachingPortfolioStopsSubscriptionsOnly` |
 | wam limit | 被抓到 | `Portfolio.breachingPortfolioStopsSubscriptionsOnly` |
 | wam reset look-through | 被抓到 | `Portfolio.metricsFollowRule2a7Definitions` |
