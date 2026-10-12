@@ -31,7 +31,7 @@
 
 - 37 個情境測試，在模擬帳本與真正的 Canton participant 上都通過；
 - 透過 JSON Ledger API 的端到端流程；
-- 75 個突變，每一個都被測試抓到；
+- 80 個突變，每一個都被測試抓到；
 - 一次獨立的對抗式審查：它以可執行的情境證明了 7 項攻擊，全部已修正並各有一個回歸情境（10.5）。
 
 ---
@@ -136,7 +136,7 @@
 **殘餘信任假設**：
 
 - 過戶代理與託管機構**串通**時，可以在帳冊外建立份數；監理端對帳可以發現（INV-11）。
-- 託管機構申報的持倉、基金行政的淨值，帳本只檢查新鮮度與一致性，不檢查真實性。
+- 託管機構申報的持倉、基金行政的淨值，帳本只檢查新鮮度與一致性，不檢查真實性。基金行政也可以平行建立第二份淨值報告；INV-16 的「定價淨值仍然有效」因此以基金行政只維持一份報告為前提。
 - 穩定幣發行人可以凍結或銷毀任何結算現金，包括鎖定中的現金。
 
 ---
@@ -201,11 +201,11 @@ stateDiagram-v2
 1. **條款**：過戶代理建立 `TermsProposal`（`replaces = None`）；監理機關 `ApproveTerms`。
    - 前置：`proposed.version = 1`。
    - 後置：建立 `FundTerms`，signatory 為過戶代理與監理機關。
-2. **淨值**：基金行政建立 `NavReport`，之後以 `Republish` 更新。每次更新封存舊報告，`seq` 遞增，`asOf` 設為 $t$。
+2. **淨值**：基金行政建立 `NavReport`，之後以 `Republish` 更新。每次更新封存舊報告，`seq` 遞增，`asOf` 設為 $t$。`NavReport` 只由基金行政簽署，所以「同時只有一份有效報告」依賴基金行政不另外平行建立報告（第 3 章）。
 3. **帳冊**：過戶代理建立 `RegisterProposal`；託管機構 `AcceptAppointment`。
    - 後置：建立 `FundRegister`，其中 $O = R = F = 0$、`status = Open`、違規清單為空，`attestedAt` 設為任命時間 $t$。signatory 為過戶代理與託管機構。
    - 因為 `attestedAt` 是任命時間，基金在第一次 `Attest` 之前、任命後 `maxAttestationAge` 內就能受理申購。此時 $R = 0$，覆蓋條件等於要求新份數完全由新進現金支撐（7.1 的 F3）。
-4. **交易場所**：交易場所建立 `MarketProposal`（內含 `status = Trading` 的控制合約與初始限制）；監理機關 `AcceptMarket` 後建立 `MarketControl`，signatory 為交易場所與監理機關。監理機關也可以 `RejectMarket`。
+4. **交易場所**：交易場所建立 `MarketProposal`，內含它提議的控制合約（狀態與初始限制，通常為 `Trading`）。監理機關 `AcceptMarket` 後，建立的 `MarketControl` 與提案內容完全相同，signatory 為交易場所與監理機關。監理機關也可以 `RejectMarket`。
 
 ### 6.2 投資人准入
 
@@ -225,7 +225,7 @@ stateDiagram-v2
 
 1. 投資人以 `CashHolding.Lock` 鎖定現金 $c$：`lockedTo = TA`、`payee = 託管機構`。
 2. 投資人建立 `SubscriptionRequest { cashAmount = c, lockedCashCid }`。
-3. 過戶代理執行 `SettleSubscription`。它先驗證鎖定金額等於 $c$，再以「過戶代理＋投資人」的授權行使帳冊的 `RecordIssuance`。
+3. 過戶代理執行 `SettleSubscription`。它先驗證條款屬於本基金、鎖定金額等於 $c$，再以「過戶代理＋投資人」的授權行使帳冊的 `RecordIssuance`。
 
 `RecordIssuance` 的**前置條件**：
 
@@ -298,7 +298,7 @@ sequenceDiagram
 **後置條件**（同一筆交易，A4）：
 
 - 價金付給賣方，份數交付給買方；
-- 建立公開的 `TradePrint`（價格、數量、幣別、成交時淨值與時間，不含任何身分），以及給監理機關的 `RegulatoryTradeReport`（含雙方）。
+- 建立公開的 `TradePrint`（交易場所、價格、數量、幣別、成交時淨值與時間，不含買賣雙方身分），以及給監理機關的 `RegulatoryTradeReport`（含雙方）。
 
 **失敗出口**：
 
@@ -444,15 +444,15 @@ sequenceDiagram
 | 編號 | 不變式（形式） | 強制方式 | 證據 |
 |---|---|---|---|
 | INV-1 | 每次發行後 $O \times N \le R + F$ | F3 於 `RecordIssuance`；A4 | `underReservedFundStopsIssuingAndRedeeming` |
-| INV-2 | 發行或贖回時，淨值與儲備聲明都新鮮（F6）。帳冊的任命時間視為第一次聲明時間（6.1） | `checkNav`；`RecordIssuance`、`RecordRedemption` 檢查 `attestedAt` | `staleAttestationOrNavBlocksIssuance`、`staleAttestationOrForeignNavBlocksRedemption` |
+| INV-2 | 發行或贖回時，淨值與儲備聲明都新鮮（F6）。帳冊的任命時間視為第一次聲明時間（6.1） | `checkNav`；`RecordIssuance`、`RecordRedemption` 檢查 `attestedAt` | `staleAttestationOrNavBlocksIssuance`、`staleAttestationOrForeignNavBlocksRedemption`（過期淨值、外來淨值、過期聲明都擋下贖回） |
 | INV-3 | 若 $O \times N > R + F$，則沒有贖回會成功 | F5 於 `RecordRedemption` | `underReservedFundStopsIssuingAndRedeeming` |
 | INV-4 | 任何讓份數交到**新持有人** $b$ 的交易，都附有 $b$ 資格合格的憑證（D8）。例外：`Seize` 交給過戶代理；退回原持有人的路徑（`Decline`、`Withdraw`、`CancelOrder`、`Unwind`、`Abort`、`Reject`、`Cancel`、`CancelPayout`、`ReclaimUnits`、各 `Recall`）不檢查 | `RecordIssuance`、`AcceptTransfer`、`Settle` 呼叫 `checkEligible` | `ineligibleInvestorsCannotSubscribe`、`expiredCredentialIsRefused`、`transfersNeedAnEligibleReceiver`、`ineligibleBuyerCannotReceiveUnits` |
-| INV-5 | 任何付款給投資人 $s$ 的交易，在付款的那筆交易中都附有 $s$ 篩檢合格的憑證（D7）；轉讓份數的轉出人也是 | `Settle`（賣方）、`Pay`（贖回人）、`OfferTransfer`（轉出人）呼叫 `checkScreened`；`ApproveRedemption` 另在核准時檢查 | `sanctionedSellerIsNotPaid`、`redeemerMustBeScreened`、`sanctionedRedeemerIsNotPaid`、`escrowedUnitsCanBeRecalled` |
+| INV-5 | 模型的付款流程（成交價金、贖回款）付款給投資人 $s$ 時，同一筆交易都附有 $s$ 篩檢合格的憑證（D7）；場外轉讓份數的轉出人也是。現金本身（`CashHolding.Transfer`）可由持有人自由轉付，不在此列 | `Settle`（賣方）、`Pay`（贖回人）、`OfferTransfer`（轉出人）呼叫 `checkScreened`；`ApproveRedemption` 另在核准時檢查 | `sanctionedSellerIsNotPaid`、`redeemerMustBeScreened`、`sanctionedRedeemerIsNotPaid`、`escrowedUnitsCanBeRecalled` |
 | INV-6 | 成交時份數與價金同時移轉，或都不移轉 | `Settle` 為單一交易；A4 | `rfqTradeSettlesDeliveryVersusPayment` |
 | INV-7 | 除了依法律命令凍結的部位，每份託管中的資產都有一條不需第三方配合的出口 | 現金：`Reclaim`（D9）。申購：`CancelSubscription` 後 `Reclaim`。轉讓：`WithdrawTransfer`。賣單：`CancelOrder`。成交：$t \ge d$ 時賣方或買方 `Abort`。贖回申請：`CancelRedemption`。待付款：$t \ge$ `payBy` 時 `ReclaimUnits` | `subscriptionCashIsNeverStuck`、`counterpartiesCanWalkAwayAfterTheDeadline`、`buyerCanAbortAfterTheDeadline`、`unpaidRedemptionLapsesToTheInvestor` |
 | INV-8 | 鎖定的現金只會付給其 `payee`（需 `owner` 在同一交易中授權，且未到期），或回到 `owner` | D9：`PayOut` 的 controller 為 `{lockedTo, owner}` 並檢查到期；`Release`、`Reclaim` 都付給 `owner`；F9 | `subscriptionCashIsNeverStuck`、`takeRequiresAMatchingLock` |
-| INV-9 | 監理停牌期間不會有成交交割，除非監理機關先解除停牌；交易場所不能以自行另立的控制合約交割，也不能自行放寬限制 | `MarketControl` $\mathrm{sig} = \{交易場所, 監理\}$ 與其狀態機；`Settle` 要求控制合約的監理機關是本基金的監理機關；`SetLimits` 只能收緊 | `haltsStopSettlement`、`venueCannotEscapeTheRegulator` |
-| INV-10 | 帳冊與份數合約都不能由單一方建立或封存；$O$ 只能經 `RecordIssuance`（TA＋申購人）與 `RecordRedemption`（TA＋託管）改變；$R$ 只由託管機構的 `Attest` 改變 | 帳冊 $\mathrm{sig} = \{TA, 託管\}$；份數合約 $\mathrm{sig} \supseteq \{TA, 託管, 持有人\}$；A1、A2 | `noSinglePartyCanRewriteTheBook`、`housekeeping` |
+| INV-9 | `Settle` 所引用的控制合約在監理停牌期間不會交割，除非監理機關先解除停牌；交易場所不能以自行另立的控制合約交割，也不能自行放寬限制。（監理機關若核准兩份控制合約，見第 12 章） | `MarketControl` $\mathrm{sig} = \{交易場所, 監理\}$ 與其狀態機；`Settle` 要求控制合約的監理機關是本基金的監理機關；`SetLimits` 只能收緊 | `haltsStopSettlement`、`venueCannotEscapeTheRegulator` |
+| INV-10 | 帳冊與份數合約都不能由單一方建立，也不能由單一方在模型的 choice 之外封存或改寫（模型內單一 controller 的 choice，如 `Attest`、`SetStatus`、`SplitUnits`、`Freeze`、`Pay`，都是 signatory 簽署合約時就同意的）；$O$ 只能經 `RecordIssuance`（TA＋申購人）與 `RecordRedemption`（TA＋託管）改變；$R$ 只由託管機構的 `Attest` 改變 | 帳冊 $\mathrm{sig} = \{TA, 託管\}$；份數合約 $\mathrm{sig} \supseteq \{TA, 託管, 持有人\}$；A1、A2 | `noSinglePartyCanRewriteTheBook` |
 | INV-11 | $\sum_{h \in \mathcal{H} \cup \mathcal{E}} \text{units}(h) = O$ | 論證見下 | 31 個情境結尾的 `checkReconciles`；app 端到端對帳 |
 | INV-12 | 條款只有在監理機關核准時才改變；修訂核准後舊條款立即失效 | `FundTerms` $\mathrm{sig} = \{TA, 監理\}$；`ApproveTerms` 封存舊版；A3 | `amendedTermsSupersedeOldOnes` |
 | INV-13 | $R$ 恆等於最近一次聲明的持倉市值總和 | `Attest` 由持倉計算 $R$，沒有其他寫入 $R$ 的 choice | `reserveIsTheSumOfPositions` |
@@ -464,9 +464,10 @@ sequenceDiagram
 **INV-11 的論證**：
 
 1. 由 A1，建立任何份數合約都需要託管機構的授權。
-2. 由 A2，choice 本體只有在託管機構是 signatory 或 controller 時才有它的授權。在本模型中，這樣的 choice 只有兩類：
+2. 由 A2，choice 本體只有在託管機構是 signatory 或 controller 時才有它的授權。在本模型中，這樣的 choice 有三類（`AcceptAppointment` 與託管機構自己的現金 choice 屬於第三類，它們不建立份數合約）：
    - (a) 帳冊的 choice。其中只有 `RecordIssuance` 建立份數合約，並同時使 $O$ 增加相同份數；`Attest`、`RecordRedemption`、`SetStatus` 不建立份數合約。
    - (b) 份數合約自身的 choice。它們都是 consuming（A3），消耗 $q$ 份並建立總量 $q$ 的份數合約：切分與合併、`carveOut`、`deliver`、`deliverFrozen`、凍結與扣押、`Take`、`ApproveRedemption`。
+   - (c) 不建立份數合約的 choice：`AcceptAppointment`，以及託管機構作為現金持有人的 `CashHolding`、`LockedCash` choice。
 3. 唯一使份數離開 $\mathcal{H} \cup \mathcal{E}$ 而不建立新份數合約的是 `RedemptionPayout.Pay`，它同時以 `RecordRedemption` 使 $O$ 減少相同份數。`Pay` 與 `RecordRedemption` 都以條款驗證工具，所以減少的是同一檔基金的 $O$。
 4. 因此總量與 $O$ 同步變動。
 5. 例外：
@@ -484,7 +485,7 @@ sequenceDiagram
 | 投資人 | ✓* | ✗* | ✗* | ✓（以 `readAs Public`）* | ✓（以 `readAs Public`） | 只有自己參與的 |
 | 交易場所 | — | 持有部位 ✗*；只看到經手成交中的託管份數（`SellOrder`、`MatchedTrade`） | 只有 `relying` 列入它的 | 淨值 ✓；帳冊、聲明以 `readAs Public` | ✓ | ✓ |
 | 託管機構 | — | ✓（共簽每份份數合約）* | 只有 `relying` 列入它的 | ✓（帳冊、聲明的 signatory；淨值的 reader） | 以 `readAs Public` | ✓（共簽 `MatchedTrade`） |
-| 監理機關 | — | ✓* | ✓ | ✓ | ✓ | ✓（`RegulatoryTradeReport`） |
+| 監理機關 | — | ✓* | ✓ | 帳冊、淨值 ✓；聲明以 `readAs Public` | ✓ | ✓（`RegulatoryTradeReport`） |
 | Public | — | ✗* | ✗ | ✓* | ✓ | ✗ |
 
 ---
@@ -495,11 +496,11 @@ sequenceDiagram
 
 | 層次 | 內容 | 指令 |
 |---|---|---|
-| 情境測試（模擬帳本） | 37 個 Daml Script 情境（另有一個示範腳本 `demo`）。<br>每個預期失敗都以 `expectFailure` 比對失敗訊息，確認是被預期的那條規則擋下。<br>移動份數的 31 個情境結尾以 `checkReconciles` 驗證 INV-11；另外 6 個只測純函式、憑證或條款，不移動份數。 | `scripts/daml-test.sh` |
+| 情境測試（模擬帳本） | 37 個 Daml Script 情境（另有一個示範腳本 `demo`）。<br>被 `assertMsg` 擋下的預期失敗一律以 `expectFailure` 比對失敗訊息，確認是被預期的那條規則擋下。缺少授權、合約已封存或看不到的失敗沒有可比對的訊息，用 `submitMustFail`（26 處，多數在 `Controls.noSinglePartyCanRewriteTheBook`）。<br>31 個情境結尾以 `checkReconciles` 驗證 INV-11。另外 6 個是純函式、資格與條款修訂、現金鎖定的情境，結尾沒有份數需要對帳。 | `scripts/daml-test.sh` |
 | 覆蓋率門檻 | 23 個 template 都必須被建立過；內建 `Archive` 以外的 59 個 choice 都必須被執行過；每個情境都必須列在 `Test.Canton`。任何一項不滿足，CI 失敗 | 同上 |
 | Canton 實跑 | 同一批情境依序在真正的 Canton participant（sandbox，靜態時間）上透過 Ledger API 執行 | `scripts/canton-test.sh` |
 | 端到端應用 | TypeScript 程式透過 JSON Ledger API v2 在 wall-clock 的 Canton sandbox 上跑完整業務流程，再以監理視角對帳並檢查 9 個條件 | `scripts/app-test.sh` |
-| 突變測試 | 逐一移除或改變 75 條檢查、計算或授權，每一條都必須讓至少一個情境失敗 | `scripts/mutation_test.py` |
+| 突變測試 | 逐一移除或改變 80 條檢查、計算或授權，每一條都必須讓至少一個情境失敗 | `scripts/mutation_test.py` |
 | 規格一致性 | 本文件附錄 C 由原始碼產生，CI 檢查它與程式碼一致 | `scripts/spec_extract.py --check` |
 | 獨立審查 | 一位不參與撰寫的審查者只拿到程式碼，任務是找出能讓不變式失敗的交易序列，並以可執行的情境證明（10.5） | — |
 
@@ -510,7 +511,7 @@ sequenceDiagram
 | 情境測試，模擬帳本 | 37／37 通過 |
 | 情境測試，Canton participant | <!-- CANTON_SCORE -->37／37 通過<!-- /CANTON_SCORE --> |
 | 端到端應用，Canton participant | 9／9 檢查通過 |
-| 突變測試 | <!-- MUTATION_SCORE -->75／75 被抓到<!-- /MUTATION_SCORE --> |
+| 突變測試 | <!-- MUTATION_SCORE -->80／80 被抓到<!-- /MUTATION_SCORE --> |
 | GitHub Actions | 每次推送執行：模擬帳本、突變清單、規格一致性、Canton 情境、端到端應用 |
 
 ### 10.3 數值實例（實跑資料）
@@ -610,13 +611,15 @@ sequenceDiagram
 | F1 | 交易場所是市場控制合約唯一的 signatory：它能封存監理停牌中的控制合約，另立一份 `Trading` 的來交割，也能任意放寬價格帶 | 控制合約改由監理共簽（`MarketProposal`／`AcceptMarket`）；`Settle` 檢查控制合約的監理機關；`SetLimits` 只能收緊，放寬改由 `RegulatorSetLimits` | `venueCannotEscapeTheRegulator` | INV-9 |
 | F2 | 只在核准贖回時篩檢，核准之後才被列入制裁名單的投資人仍會收到款項 | `Pay` 重新檢查投資人的篩檢 | `sanctionedRedeemerIsNotPaid` | INV-5 |
 | F3 | 淨值下修後，仍可依舊淨值支付已核准的贖回，損失由留下的持有人承擔 | 核准時記錄 `navSeq`；`Pay` 要求傳入的淨值報告仍是那一份 | `stalePricedPayoutIsRefused` | INV-16 |
-| F4 | 凍結與扣押只作用在持有部位：份數放進託管合約就逃出執法範圍；被制裁的持有人也能以轉讓贈與他人 | 五個 `Recall` choice；`OfferTransfer` 檢查轉出人的篩檢 | `escrowedUnitsCanBeRecalled` | INV-17、INV-5 |
+| F4 | 凍結與扣押只作用在持有部位：份數放進託管合約就逃出執法範圍；被制裁的持有人也能以轉讓贈與他人 | 五個 `Recall` choice；`OfferTransfer` 檢查轉出人的篩檢 | `escrowedUnitsCanBeRecalled`：五種託管都被召回，每一種缺少命令編號時都被拒；轉出人篩檢以非本基金 KYC 機構簽發的憑證驗證 | INV-17、INV-5 |
 | F5 | `Take` 只檢查鎖定的內容，同一份鎖定可以承接兩張賣單；第二位賣方的份數會卡到期限 | `Take` 以 `Commit` 承諾鎖定 | `oneLockBacksOneTrade` | INV-15 |
 | F6 | `Pay` 只檢查現金的發行人與幣別。託管機構可以拿投資人自己的現金「付」贖回款：付款合約由投資人簽署，choice 本體因此帶有投資人的授權 | `Pay` 要求現金的持有人是託管機構 | `redemptionIsPaidFromCustodyCash` | INV-16 |
 | F7 | 已核准的贖回沒有投資人的出口：只有託管付款或過戶代理取消能結束它 | `payBy` 與 `ReclaimUnits` | `unpaidRedemptionLapsesToTheInvestor` | INV-7 |
 | F8 | 監理機關可以把兩份 `replaces = None` 的首版條款都核准，同時存在兩份第 1 版條款 | 不改程式碼：兩份都經過監理核准，屬於程序問題，列入第 12 章 | — | INV-12 |
 
 同一輪另外補上 `buyerCanAbortAfterTheDeadline`：程式碼本來就允許買方在期限後 `Abort`，但 1.0 版的測試只驗證了賣方。每一項修正也都加入突變測試：拿掉該修正，必須有情境失敗。
+
+修正之後，另一位審查者逐句比對 1.1 版第 1–12 章與程式碼，找到 2 處錯誤與 10 處不精確（例如 INV-10 的措辭、隱私矩陣的一格、三項唯一性缺口沒有列入第 12 章），也指出兩個沒有測試的路徑：過期淨值擋下贖回，以及扣押與四種召回缺少命令編號。文字都已更正；兩個路徑補上了測試，並加上 5 個新突變。
 
 ---
 
@@ -640,9 +643,11 @@ sequenceDiagram
 - 第 3 章的殘餘信任假設：串通、申報的真實性、穩定幣發行人的凍結權。
 - 沒有 contract key，帳本不保證唯一性：
   - 過戶代理與託管機構可以合作建立同一檔基金的第二本帳冊（D3）；
-  - 監理機關可以核准兩份第 1 版條款（10.5 的 F8）。
-  
-  兩者都需要被信任的機構配合，屬於程序控制；監理機關看得到所有帳冊與條款，可以發現。
+  - 監理機關可以核准兩份第 1 版條款（10.5 的 F8）；
+  - 監理機關可以為同一交易場所與工具核准兩份控制合約；停牌其中一份，另一份仍可用來交割；
+  - 基金行政可以平行建立兩份淨值報告。
+
+  以上都需要被信任的機構配合，屬於程序控制；監理機關看得到所有帳冊、條款與控制合約，可以發現。
 - 帳冊是熱點合約，申購贖回需要依序處理。
 - 不能更換託管機構。
 - 淨值重新發布後，已核准但未付款的贖回必須取消再重新核准（6.7）。

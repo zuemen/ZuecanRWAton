@@ -130,9 +130,13 @@ staleAttestationOrForeignNavBlocksRedemption = do
       navPerUnit = 2.0, asOf = now, seq = 1, methodologyRef = "made up"
   expectFailure "not struck by the fund's NAV agent" w.p.ta do
     exerciseCmd req ApproveRedemption with termsCid = w.termsCid, navCid = rogueNav, credentialCid = w.aliceCred
-  -- A day and a half later the NAV is fresh again but the custodian has
-  -- not attested since the appointment.
+  -- A day and a half later the NAV is out of date: no redemption is priced
+  -- at it.
   advanceTime w (hours 31)
+  expectFailure "NAV is out of date" w.p.ta do
+    exerciseCmd req ApproveRedemption with termsCid = w.termsCid, navCid = w.navCid, credentialCid = w.aliceCred
+  -- Once the NAV is republished it is fresh again, but the custodian has
+  -- not attested since the appointment.
   w <- republishNav w launchNav
   payout <- submit w.p.ta do
     exerciseCmd req ApproveRedemption with termsCid = w.termsCid, navCid = w.navCid, credentialCid = w.aliceCred

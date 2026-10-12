@@ -178,7 +178,7 @@ scripts/canton-test.sh   # Canton sandbox participant：Test.Canton:allScenarios
   - **`daml script --all` 會平行執行腳本**，而靜態時間的時鐘是共用的，一個情境快轉時間會打壞另一個情境的期限。改成由 `Test.Canton:allScenarios` 依序執行。
   - **時間一次快轉數小時或數天後，synchronizer 會中斷並重建 sequencer 連線**，之後的第一筆交易會失敗（`SEQUENCER_REQUEST_FAILED`，接著是 `UNKNOWN_CONTRACT_SYNCHRONIZERS`）。`advanceTime` 快轉後會用一份 `Heartbeat` 合約探測，等到交易能送出再繼續。
 
-**突變測試**：逐一把 75 條關鍵檢查、計算或授權拿掉（條件改成永遠成立、刪掉檢查，或少一個 signatory／controller），確認至少一個測試因此失敗。結果見下表（2026-10-12，Daml SDK 3.4.0-rc2，最終程式碼）。
+**突變測試**：逐一把 80 條關鍵檢查、計算或授權拿掉（條件改成永遠成立、刪掉檢查、改變一個計算，或少一個 signatory／controller），確認至少一個測試因此失敗。結果見下表（2026-10-12，Daml SDK 3.4.0-rc2，最終程式碼）。
 
 | 突變 | 結果 | 第一個失敗的情境 |
 |---|---|---|

@@ -132,14 +132,18 @@ escrowedUnitsCanBeRecalled = do
     exerciseCmd rest ListForSale with
       buyer = w.p.bob, operator = w.p.operator, amount = 1000.0, price = 1.0430
       cashIssuer = w.p.usd, currency = "USD", expiresAt = addRelTime now (hours 1), settleWithin = hours 1
+  expectFailure "a legal order reference is required" w.p.ta do exerciseCmd order RecallOrder with legalOrderRef = ""
   f2 <- submit w.p.ta do exerciseCmd order RecallOrder with legalOrderRef = "order-2"
   (trade, Some rest) <- quoteAndTake w rest 1000.0 1.0430
+  expectFailure "a legal order reference is required" w.p.ta do exerciseCmd trade RecallTrade with legalOrderRef = ""
   f3 <- submit w.p.ta do exerciseCmd trade RecallTrade with legalOrderRef = "order-3"
   (req, Some rest) <- submit w.p.alice do exerciseCmd rest RequestRedemption with amount = 1000.0
+  expectFailure "a legal order reference is required" w.p.ta do exerciseCmd req RecallRedemption with legalOrderRef = ""
   f4 <- submit w.p.ta do exerciseCmd req RecallRedemption with legalOrderRef = "order-4"
   (req, Some rest) <- submit w.p.alice do exerciseCmd rest RequestRedemption with amount = 1000.0
   payout <- submit w.p.ta do
     exerciseCmd req ApproveRedemption with termsCid = w.termsCid, navCid = w.navCid, credentialCid = w.aliceCred
+  expectFailure "a legal order reference is required" w.p.ta do exerciseCmd payout RecallPayout with legalOrderRef = ""
   f5 <- submit w.p.ta do exerciseCmd payout RecallPayout with legalOrderRef = "order-5"
   frozen <- mapA (queryContractId w.p.alice) [f1, f2, f3, f4, f5]
   assertMsg "every recall hands back a frozen holding of the same units"

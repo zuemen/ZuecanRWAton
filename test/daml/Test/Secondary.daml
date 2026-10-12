@@ -224,6 +224,7 @@ freezeAndSeizeUnderLegalOrder = do
       cashIssuer = w.p.usd, currency = "USD", expiresAt = addRelTime now (hours 1), settleWithin = hours 1
   expectFailure "the holding is frozen" w.p.alice do
     exerciseCmd frozen RequestRedemption with amount = 1000.0
+  expectFailure "a legal order reference is required" w.p.ta do exerciseCmd frozen Seize with legalOrderRef = ""
   seized <- submit w.p.ta do exerciseCmd frozen Seize with legalOrderRef = "court order 2026-TPE-001 (turnover)"
   Some s <- queryContractId w.p.ta seized
   assertMsg "the units moved to the transfer agent" (s.owner == w.p.ta && s.frozen)
