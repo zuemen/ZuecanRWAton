@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Build both packages and run all scenarios inside the pinned Daml SDK image.
-# Fails if a scenario fails or if any non-Archive choice is never exercised.
+# Fails if a scenario fails, a template is never created, a non-Archive
+# choice is never exercised, or a scenario is missing from Test.Canton.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 image="${DAML_IMAGE:-digitalasset/daml-sdk:3.4.0-rc2}"
@@ -26,6 +27,13 @@ unexercised="$(sed -n '/template choices never exercised: [1-9]/,/^- /p' "$log" 
 if [ -n "$unexercised" ]; then
   echo "::error::choices never exercised by any scenario:"
   echo "$unexercised"
+  exit 1
+fi
+# Coverage gate, templates: every template of the ledger package is created
+# by some scenario.
+if ! grep -qE '^  external templates never created: 0$' "$log"; then
+  echo "::error::templates never created by any scenario:"
+  sed -n '/external templates never created: [1-9]/,/^- /p' "$log" | grep -E '^ +zuecan-rwa:' || true
   exit 1
 fi
 # Test.Canton:allScenarios must list every scenario, or the Canton run

@@ -55,6 +55,12 @@ module Zuecan.Registry
   , CancelRedemption (..)
   , Pay (..)
   , CancelPayout (..)
+  , ReclaimUnits (..)
+  , RecallOffer (..)
+  , RecallOrder (..)
+  , RecallTrade (..)
+  , RecallRedemption (..)
+  , RecallPayout (..)
   , liability
   , coverage
   , settlementDeadline
@@ -325,8 +331,17 @@ template FundHolding
       with
         receiver : Party
         amount : Decimal
+        termsCid : ContractId FundTerms
+        credentialCid : ContractId InvestorCredential
       controller owner
       do
+        -- A sanctioned holder must not be able to move units away from a
+        -- freeze by gifting them.
+        now <- getTime
+        terms <- fetch termsCid
+        checkTermsFor instrument terms
+        cred <- fetch credentialCid
+        checkScreened terms.compliance owner terms.eligibility now cred
         rest <- carveOut this amount
         offer <- create TransferOffer with
           instrument, custodian, sender = owner, receiver, units = amount, regulator
@@ -428,6 +443,18 @@ template TransferOffer
       controller sender
       do deliver instrument custodian sender units regulator
 
+    -- | Legal hold on units in escrow: they go back to sender as a frozen
+    --   holding, so parking units in an escrow does not put them out of reach
+    --   of a freeze or seizure.
+    choice RecallOffer : ContractId FundHolding
+      with
+        legalOrderRef : Text
+      controller instrument.registrar
+      do
+        assertMsg "a legal order reference is required" (legalOrderRef /= "")
+        _ <- recordEnforcementOf instrument.registrar sender regulator "recall" legalOrderRef units
+        deliverFrozen instrument custodian sender units regulator
+
 -- | A firm quote to one buyer. Taking it requires the buyer to have locked
 --   exactly the notional for the venue to pay the seller.
 template SellOrder
@@ -465,13 +492,27 @@ template SellOrder
         -- earlier and the buyer could pull the cash mid-settlement, later and
         -- the venue could still pay the seller after the trade was aborted.
         assertMsg "the cash lock must lapse exactly at the settlement deadline" (lc.releaseAfter == deadline)
+        -- Pledge the lock to this trade so it cannot back another one too.
+        committedCid <- exercise lockedCashCid Cash.Commit
         create MatchedTrade with
           instrument, custodian, seller, buyer, operator, regulator, units, price
-          cashIssuer, currency, lockedCashCid, matchedAt = now, deadline
+          cashIssuer, currency, lockedCashCid = committedCid, matchedAt = now, deadline
 
     choice CancelOrder : ContractId FundHolding
       controller seller
       do deliver instrument custodian seller units regulator
+
+    -- | Legal hold on units in escrow: they go back to seller as a frozen
+    --   holding, so parking units in an escrow does not put them out of reach
+    --   of a freeze or seizure.
+    choice RecallOrder : ContractId FundHolding
+      with
+        legalOrderRef : Text
+      controller instrument.registrar
+      do
+        assertMsg "a legal order reference is required" (legalOrderRef /= "")
+        _ <- recordEnforcementOf instrument.registrar seller regulator "recall" legalOrderRef units
+        deliverFrozen instrument custodian seller units regulator
 
 -- | Both sides committed; the venue settles delivery-versus-payment in one
 --   transaction or unwinds. If it does neither by `deadline`, either
@@ -509,6 +550,7 @@ template MatchedTrade
         market <- fetch marketCid
         assertMsg "market control is for another venue or instrument"
           (market.operator == operator && market.instrument == instrument)
+        assertMsg "the market control is not co-signed by the fund's regulator" (market.regulator == regulator)
         assertMsg ("the market is not trading: " <> show market.status) (market.status == Trading)
         assertMsg "the trade exceeds the venue's per-trade size cap" (units <= market.maxTradeUnits)
         terms <- fetch termsCid
@@ -557,6 +599,18 @@ template MatchedTrade
         assertMsg "the venue still has until the deadline to settle" (now >= deadline)
         deliver instrument custodian seller units regulator
 
+    -- | Legal hold on units in a matched trade: they go back to the seller as
+    --   a frozen holding. The buyer's cash lock lapses at the deadline and is
+    --   reclaimed with LockedCash.Reclaim.
+    choice RecallTrade : ContractId FundHolding
+      with
+        legalOrderRef : Text
+      controller instrument.registrar
+      do
+        assertMsg "a legal order reference is required" (legalOrderRef /= "")
+        _ <- recordEnforcementOf instrument.registrar seller regulator "recall" legalOrderRef units
+        deliverFrozen instrument custodian seller units regulator
+
 template RedemptionRequest
   with
     instrument : InstrumentId
@@ -590,7 +644,8 @@ template RedemptionRequest
         assertMsg "the redemption is worth less than one cent" (cashAmount >= 0.01)
         create RedemptionPayout with
           instrument, custodian, investor, regulator, units, cashAmount
-          navPerUnit = nav.navPerUnit, approvedAt = now
+          navPerUnit = nav.navPerUnit, navSeq = nav.seq, approvedAt = now
+          payBy = addRelTime now terms.maxNavAge
 
     choice RejectRedemption : ContractId FundHolding
       with
@@ -601,6 +656,18 @@ template RedemptionRequest
     choice CancelRedemption : ContractId FundHolding
       controller investor
       do deliver instrument custodian investor units regulator
+
+    -- | Legal hold on units in escrow: they go back to investor as a frozen
+    --   holding, so parking units in an escrow does not put them out of reach
+    --   of a freeze or seizure.
+    choice RecallRedemption : ContractId FundHolding
+      with
+        legalOrderRef : Text
+      controller instrument.registrar
+      do
+        assertMsg "a legal order reference is required" (legalOrderRef /= "")
+        _ <- recordEnforcementOf instrument.registrar investor regulator "recall" legalOrderRef units
+        deliverFrozen instrument custodian investor units regulator
 
 -- | The transfer agent has struck the price; the custodian pays out of the
 --   fund's cash and the units are retired in the same transaction.
@@ -613,7 +680,9 @@ template RedemptionPayout
     units : Decimal
     cashAmount : Decimal
     navPerUnit : Decimal
+    navSeq : Int      -- ^ the NAV report the price was struck at
     approvedAt : Time
+    payBy : Time      -- ^ after this the investor can take the units back
   where
     signatory instrument.registrar, custodian, investor
     observer regulator
@@ -624,13 +693,25 @@ template RedemptionPayout
         registerCid : ContractId FundRegister
         termsCid : ContractId FundTerms
         navCid : ContractId NavReport
+        credentialCid : ContractId InvestorCredential
       controller custodian
       do
+        now <- getTime
+        assertMsg "the payout has lapsed; the investor can take the units back" (now < payBy)
         terms <- fetch termsCid
         checkTermsFor instrument terms
+        -- Paying a price struck at a NAV that has since been replaced (say,
+        -- marked down) would let an early redeemer leave at the old price
+        -- and the remaining holders carry the loss.
+        nav <- fetch navCid
+        assertMsg "the payout was priced at a NAV that is no longer current; cancel and re-approve it"
+          (nav.seq == navSeq && nav.navPerUnit == navPerUnit)
+        -- The investor may have been sanctioned since approval.
+        cred <- fetch credentialCid
+        checkScreened terms.compliance investor terms.eligibility now cred
         cash <- fetch cashCid
-        assertMsg "payment must be in the fund's settlement asset"
-          (cash.issuer == terms.cashIssuer && cash.currency == terms.currency)
+        assertMsg "payment must be the custodian's own cash in the fund's settlement asset"
+          (cash.owner == custodian && cash.issuer == terms.cashIssuer && cash.currency == terms.currency)
         (paid, _) <- exercise cashCid Cash.Transfer with newOwner = investor, transferAmount = cashAmount
         register <- exercise registerCid RecordRedemption with units, cashOut = cashAmount, termsCid, navCid
         pure (paid, register)
@@ -640,6 +721,26 @@ template RedemptionPayout
         reason : Text
       controller instrument.registrar
       do deliver instrument custodian investor units regulator
+
+    -- | The investor's exit when the custodian has not paid in time.
+    choice ReclaimUnits : ContractId FundHolding
+      controller investor
+      do
+        now <- getTime
+        assertMsg "the custodian still has until payBy to pay" (now >= payBy)
+        deliver instrument custodian investor units regulator
+
+    -- | Legal hold on units in escrow: they go back to investor as a frozen
+    --   holding, so parking units in an escrow does not put them out of reach
+    --   of a freeze or seizure.
+    choice RecallPayout : ContractId FundHolding
+      with
+        legalOrderRef : Text
+      controller instrument.registrar
+      do
+        assertMsg "a legal order reference is required" (legalOrderRef /= "")
+        _ <- recordEnforcementOf instrument.registrar investor regulator "recall" legalOrderRef units
+        deliverFrozen instrument custodian investor units regulator
 
 -- | Audit trail of freezes, unfreezes and seizures.
 template EnforcementRecord
@@ -676,9 +777,16 @@ deliver : InstrumentId -> Party -> Party -> Decimal -> Party -> Update (Contract
 deliver instrument custodian owner units regulator =
   create FundHolding with instrument, custodian, owner, units, frozen = False, regulator
 
+-- | Units back into a frozen holding, for a legal hold on units in escrow.
+deliverFrozen : InstrumentId -> Party -> Party -> Decimal -> Party -> Update (ContractId FundHolding)
+deliverFrozen instrument custodian owner units regulator =
+  create FundHolding with instrument, custodian, owner, units, frozen = True, regulator
+
 recordEnforcement : FundHolding -> Text -> Text -> Update (ContractId EnforcementRecord)
-recordEnforcement h action reference = do
+recordEnforcement h action reference =
+  recordEnforcementOf h.instrument.registrar h.owner h.regulator action reference h.units
+
+recordEnforcementOf : Party -> Party -> Party -> Text -> Text -> Decimal -> Update (ContractId EnforcementRecord)
+recordEnforcementOf registrar owner regulator action reference units = do
   now <- getTime
-  create EnforcementRecord with
-    registrar = h.instrument.registrar, owner = h.owner, regulator = h.regulator
-    action, reference, units = h.units, recordedAt = now
+  create EnforcementRecord with registrar, owner, regulator, action, reference, units, recordedAt = now

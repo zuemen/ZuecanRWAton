@@ -1,0 +1,242 @@
+-- | The attacks an independent review demonstrated against an earlier version
+--   of the model, each now refused. One scenario per finding (F1–F7).
+module Test.Adversarial where
+
+import DA.Time
+import Daml.Script
+
+import Test.Secondary (funded, quoteAndTake, settleCmd)
+import Test.Setup
+import Zuecan.Cash
+import Zuecan.Compliance
+import Zuecan.Market
+import Zuecan.Registry
+import Zuecan.Types
+
+-- | F1. The venue used to be the market control's only signatory: it could
+--   archive a regulator-halted control, create a fresh "Trading" one and
+--   settle under it, and widen its own price band at will.
+venueCannotEscapeTheRegulator : Script ()
+venueCannotEscapeTheRegulator = do
+  (w, holding) <- funded
+  (trade, _) <- quoteAndTake w holding 10000.0 1.0430
+  halted <- submit w.p.regulator do exerciseCmd w.marketCid RegulatorHalt with reason = "coordinated halt"
+  -- It cannot archive the halted control, or create a replacement alone.
+  submitMustFail w.p.operator do archiveCmd halted
+  submitMustFail w.p.operator do
+    createCmd MarketControl with
+      operator = w.p.operator, regulator = w.p.regulator, instrument = w.instrument, readers = []
+      status = Trading, maxTradeUnits = 1.0e12, maxDeviationBps = 1.0e9
+  -- A control co-signed by some other "regulator" does not count either.
+  other <- freshParty "OtherRegulator"
+  proposal <- submit w.p.operator do
+    createCmd MarketProposal with
+      control = MarketControl with
+        operator = w.p.operator, regulator = other, instrument = w.instrument, readers = []
+        status = Trading, maxTradeUnits = 1.0e12, maxDeviationBps = 1.0e9
+  rogue <- submit other do exerciseCmd proposal AcceptMarket
+  expectFailure "not co-signed by the fund's regulator" w.p.operator do
+    exerciseCmd trade Settle with
+      marketCid = rogue, termsCid = w.termsCid, navCid = w.navCid
+      buyerCredentialCid = w.bobCred, sellerCredentialCid = w.aliceCred
+  expectFailure "the market is not trading" w.p.operator (settleCmd (w with marketCid = halted) trade)
+  -- The regulator can turn a proposal down.
+  declined <- submit w.p.operator do
+    createCmd MarketProposal with
+      control = MarketControl with
+        operator = w.p.operator, regulator = w.p.regulator, instrument = w.instrument, readers = []
+        status = Trading, maxTradeUnits = 1.0, maxDeviationBps = 1.0
+  submit w.p.regulator do exerciseCmd declined RejectMarket with reason = "one market per instrument"
+
+  -- Limits: the venue may tighten on its own, only the regulator may loosen.
+  open <- submit w.p.regulator do exerciseCmd halted RegulatorResume
+  expectFailure "can only tighten its limits" w.p.operator do
+    exerciseCmd open SetLimits with newMaxTradeUnits = 50000.0, newMaxDeviationBps = 10000.0
+  tighter <- submit w.p.operator do
+    exerciseCmd open SetLimits with newMaxTradeUnits = 20000.0, newMaxDeviationBps = 25.0
+  wider <- submit w.p.regulator do
+    exerciseCmd tighter RegulatorSetLimits with newMaxTradeUnits = 50000.0, newMaxDeviationBps = 50.0
+  _ <- submit w.p.operator (settleCmd (w with marketCid = wider) trade)
+  checkReconciles w
+
+-- | F2. Screening used to run only when the transfer agent approved a
+--   redemption, so an investor sanctioned between approval and payment was
+--   still paid. The custodian now re-screens when it pays.
+sanctionedRedeemerIsNotPaid : Script ()
+sanctionedRedeemerIsNotPaid = do
+  (w, holding) <- funded
+  (req, _) <- submit w.p.alice do exerciseCmd holding RequestRedemption with amount = 1000.0
+  payout <- submit w.p.ta do
+    exerciseCmd req ApproveRedemption with termsCid = w.termsCid, navCid = w.navCid, credentialCid = w.aliceCred
+  cash <- largestCash w.p.custodian
+  let pay cred = exerciseCmd payout Pay with
+        cashCid = cash, registerCid = w.registerCid, termsCid = w.termsCid, navCid = w.navCid, credentialCid = cred
+  -- Someone else's clean credential does not stand in for the investor's.
+  expectFailure "credential belongs to a different investor" w.p.custodian (pay w.bobCred)
+  _ <- submit w.p.compliance do exerciseCmd w.aliceCred Revoke with reason = "sanctions hit"
+  submitMustFail w.p.custodian (pay w.aliceCred)
+  -- The transfer agent stops the payout; the units go back to the investor.
+  _ <- submit w.p.ta do exerciseCmd payout CancelPayout with reason = "investor sanctioned"
+  checkReconciles w
+
+-- | F3. A payout priced at an old NAV could be paid after the NAV was
+--   marked down, leaving the remaining holders uncovered. Payment now
+--   requires the NAV report the price was struck at to still be the live one.
+stalePricedPayoutIsRefused : Script ()
+stalePricedPayoutIsRefused = do
+  w <- setup
+  (aliceHolding, w) <- subscribe w w.p.alice w.aliceCred 100000.0
+  (_, w) <- subscribe w w.p.bob w.bobCred 100000.0
+  w <- attest w 200000.0 "custodian-statement-day-1"
+  Some h <- queryContractId w.p.alice aliceHolding
+  (req, None) <- submit w.p.alice do exerciseCmd aliceHolding RequestRedemption with amount = h.units
+  payout <- submit w.p.ta do
+    exerciseCmd req ApproveRedemption with termsCid = w.termsCid, navCid = w.navCid, credentialCid = w.aliceCred
+  -- The portfolio halves; the NAV and the custodian's statement follow.
+  w <- republishNav w (launchNav / 2.0)
+  w <- attest w 100000.0 "custodian-statement-loss"
+  cash <- largestCash w.p.custodian
+  expectFailure "priced at a NAV that is no longer current" w.p.custodian do
+    exerciseCmd payout Pay with
+      cashCid = cash, registerCid = w.registerCid, termsCid = w.termsCid, navCid = w.navCid, credentialCid = w.aliceCred
+  -- Re-approved at the marked-down NAV, Alice gets her fair share and Bob's
+  -- units stay covered.
+  restored <- submit w.p.ta do exerciseCmd payout CancelPayout with reason = "NAV marked down"
+  (req, _) <- submit w.p.alice do exerciseCmd restored RequestRedemption with amount = h.units
+  payout <- submit w.p.ta do
+    exerciseCmd req ApproveRedemption with termsCid = w.termsCid, navCid = w.navCid, credentialCid = w.aliceCred
+  (_, registerCid) <- submit w.p.custodian do
+    exerciseCmd payout Pay with
+      cashCid = cash, registerCid = w.registerCid, termsCid = w.termsCid, navCid = w.navCid, credentialCid = w.aliceCred
+  let w' = w with registerCid
+  reg <- register w'
+  assertMsg "the remaining units are still covered" (liability reg (launchNav / 2.0) <= coverage reg)
+  checkReconciles w'
+
+-- | F4. Freeze and Seize only reached holdings, so a holder could keep units
+--   out of reach in an escrow, and a sanctioned holder could gift them away.
+--   Every unit escrow can now be recalled into a frozen holding, and the
+--   sender of a gift must pass screening.
+escrowedUnitsCanBeRecalled : Script ()
+escrowedUnitsCanBeRecalled = do
+  (w, holding) <- funded
+  now <- getTime
+  -- Units parked in an offer to oneself.
+  (offer, Some rest) <- submit (actAs w.p.alice <> readAs w.p.public) do
+    exerciseCmd holding OfferTransfer with
+      receiver = w.p.alice, amount = 1000.0, termsCid = w.termsCid, credentialCid = w.aliceCred
+  expectFailure "a legal order reference is required" w.p.ta do exerciseCmd offer RecallOffer with legalOrderRef = ""
+  f1 <- submit w.p.ta do exerciseCmd offer RecallOffer with legalOrderRef = "order-1"
+  -- A sell order, a matched trade, a redemption request and a payout.
+  (order, Some rest) <- submit w.p.alice do
+    exerciseCmd rest ListForSale with
+      buyer = w.p.bob, operator = w.p.operator, amount = 1000.0, price = 1.0430
+      cashIssuer = w.p.usd, currency = "USD", expiresAt = addRelTime now (hours 1), settleWithin = hours 1
+  f2 <- submit w.p.ta do exerciseCmd order RecallOrder with legalOrderRef = "order-2"
+  (trade, Some rest) <- quoteAndTake w rest 1000.0 1.0430
+  f3 <- submit w.p.ta do exerciseCmd trade RecallTrade with legalOrderRef = "order-3"
+  (req, Some rest) <- submit w.p.alice do exerciseCmd rest RequestRedemption with amount = 1000.0
+  f4 <- submit w.p.ta do exerciseCmd req RecallRedemption with legalOrderRef = "order-4"
+  (req, Some rest) <- submit w.p.alice do exerciseCmd rest RequestRedemption with amount = 1000.0
+  payout <- submit w.p.ta do
+    exerciseCmd req ApproveRedemption with termsCid = w.termsCid, navCid = w.navCid, credentialCid = w.aliceCred
+  f5 <- submit w.p.ta do exerciseCmd payout RecallPayout with legalOrderRef = "order-5"
+  frozen <- mapA (queryContractId w.p.alice) [f1, f2, f3, f4, f5]
+  assertMsg "every recall hands back a frozen holding of the same units"
+    (all (\h -> case h of Some x -> x.frozen && x.owner == w.p.alice && x.units == 1000.0; None -> False) frozen)
+  records <- query @EnforcementRecord w.p.regulator
+  assertMsg "each recall is on the record" (length records == 5)
+  -- A holder whose screening fails cannot gift units away; here her only
+  -- other credential is from a KYC agent the fund does not rely on.
+  rogueKyc <- freshParty "RogueKyc"
+  rogueReq <- submit w.p.alice do
+    createCmd CredentialRequest with
+      investor = w.p.alice, compliance = rogueKyc, requestedClass = Accredited
+      jurisdiction = "US", evidenceHash = "sha256:none"
+  rogueCred <- submit rogueKyc do
+    exerciseCmd rogueReq Approve with
+      grantedClass = Accredited, validFor = days 365, relying = [w.p.ta], regulator = w.p.regulator
+  expectFailureAs "not issued by the fund's compliance agent" (actAs w.p.alice <> readAs w.p.public) do
+    exerciseCmd rest OfferTransfer with
+      receiver = w.p.bob, amount = 1.0, termsCid = w.termsCid, credentialCid = rogueCred
+  checkReconciles w
+
+-- | F5. Take only looked at the buyer's cash lock, so one lock could back two
+--   matched trades and leave the second seller's units stuck. Taking now
+--   pledges the lock to that trade.
+oneLockBacksOneTrade : Script ()
+oneLockBacksOneTrade = do
+  (w, holding) <- funded
+  now <- getTime
+  let expiresAt = addRelTime now (hours 1)
+      list h = submit w.p.alice do
+        exerciseCmd h ListForSale with
+          buyer = w.p.bob, operator = w.p.operator, amount = 1000.0, price = 1.0430
+          cashIssuer = w.p.usd, currency = "USD", expiresAt, settleWithin = hours 1
+  (order1, Some rest) <- list holding
+  (order2, _) <- list rest
+  cash <- largestCash w.p.bob
+  (lock, _) <- submit w.p.bob do
+    exerciseCmd cash Lock with
+      lockedTo = w.p.operator, payee = w.p.alice, lockAmount = 1043.0
+      releaseAfter = addRelTime expiresAt (hours 1), purpose = "buy"
+  trade1 <- submit w.p.bob do exerciseCmd order1 Take with lockedCashCid = lock
+  Some t1 <- queryContractId w.p.bob trade1
+  -- The original lock id is gone, and the pledged lock cannot be pledged again.
+  submitMustFail w.p.bob do exerciseCmd order2 Take with lockedCashCid = lock
+  expectFailure "already backs a trade" w.p.bob do exerciseCmd order2 Take with lockedCashCid = t1.lockedCashCid
+  _ <- submit w.p.operator (settleCmd w trade1)
+  _ <- submit w.p.alice do exerciseCmd order2 CancelOrder
+  checkReconciles w
+
+-- | F6. Pay only checked the cash's issuer and currency, so the custodian
+--   could "pay" a redemption with cash it could see but did not own.
+redemptionIsPaidFromCustodyCash : Script ()
+redemptionIsPaidFromCustodyCash = do
+  (w, holding) <- funded
+  (req, _) <- submit w.p.alice do exerciseCmd holding RequestRedemption with amount = 1000.0
+  payout <- submit w.p.ta do
+    exerciseCmd req ApproveRedemption with termsCid = w.termsCid, navCid = w.navCid, credentialCid = w.aliceCred
+  aliceCash <- largestCash w.p.alice
+  expectFailureAs "the custodian's own cash" (actAs w.p.custodian <> readAs w.p.alice) do
+    exerciseCmd payout Pay with
+      cashCid = aliceCash, registerCid = w.registerCid, termsCid = w.termsCid, navCid = w.navCid, credentialCid = w.aliceCred
+  checkReconciles w
+
+-- | F7. An approved redemption had no exit for the investor: only the
+--   custodian (Pay) or the transfer agent (CancelPayout) could end it. The
+--   payout now lapses after one NAV period and the investor takes the units
+--   back.
+unpaidRedemptionLapsesToTheInvestor : Script ()
+unpaidRedemptionLapsesToTheInvestor = do
+  (w, holding) <- funded
+  (req, _) <- submit w.p.alice do exerciseCmd holding RequestRedemption with amount = 1000.0
+  payout <- submit w.p.ta do
+    exerciseCmd req ApproveRedemption with termsCid = w.termsCid, navCid = w.navCid, credentialCid = w.aliceCred
+  expectFailure "still has until payBy" w.p.alice do exerciseCmd payout ReclaimUnits
+  advanceTime w (hours 31)
+  w <- republishNav w launchNav
+  w <- attest w 100000.0 "custodian-statement-day-2"
+  cash <- largestCash w.p.custodian
+  expectFailure "the payout has lapsed" w.p.custodian do
+    exerciseCmd payout Pay with
+      cashCid = cash, registerCid = w.registerCid, termsCid = w.termsCid, navCid = w.navCid, credentialCid = w.aliceCred
+  back <- submit w.p.alice do exerciseCmd payout ReclaimUnits
+  Some b <- queryContractId w.p.alice back
+  assertMsg "the units are back with the investor" (b.units == 1000.0 && not b.frozen)
+  checkReconciles w
+
+-- | The buyer, not only the seller, can walk away once the venue's time is up.
+buyerCanAbortAfterTheDeadline : Script ()
+buyerCanAbortAfterTheDeadline = do
+  (w, holding) <- funded
+  (trade, _) <- quoteAndTake w holding 10000.0 1.0430
+  Some t <- queryContractId w.p.bob trade
+  advanceTime w (hours 2)
+  restored <- submit w.p.bob do exerciseCmd trade Abort with actor = w.p.bob
+  _ <- submit w.p.bob do exerciseCmd t.lockedCashCid Reclaim
+  Some r <- queryContractId w.p.alice restored
+  assertMsg "the units go back to the seller" (r.owner == w.p.alice && r.units == 10000.0)
+  bobCash <- cashOf w.p.bob
+  assertMsg "the buyer has his cash back" (bobCash == 1000000.0)
+  checkReconciles w

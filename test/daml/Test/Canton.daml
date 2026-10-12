@@ -10,6 +10,7 @@ module Test.Canton where
 import DA.Foldable (forA_)
 import Daml.Script
 
+import qualified Test.Adversarial
 import qualified Test.Controls
 import qualified Test.Portfolio
 import qualified Test.Primary
@@ -17,7 +18,15 @@ import qualified Test.Secondary
 
 scenarios : [(Text, Script ())]
 scenarios =
-  [ ("Controls.housekeeping", Test.Controls.housekeeping)
+  [ ("Adversarial.buyerCanAbortAfterTheDeadline", Test.Adversarial.buyerCanAbortAfterTheDeadline)
+  , ("Adversarial.escrowedUnitsCanBeRecalled", Test.Adversarial.escrowedUnitsCanBeRecalled)
+  , ("Adversarial.oneLockBacksOneTrade", Test.Adversarial.oneLockBacksOneTrade)
+  , ("Adversarial.redemptionIsPaidFromCustodyCash", Test.Adversarial.redemptionIsPaidFromCustodyCash)
+  , ("Adversarial.sanctionedRedeemerIsNotPaid", Test.Adversarial.sanctionedRedeemerIsNotPaid)
+  , ("Adversarial.stalePricedPayoutIsRefused", Test.Adversarial.stalePricedPayoutIsRefused)
+  , ("Adversarial.unpaidRedemptionLapsesToTheInvestor", Test.Adversarial.unpaidRedemptionLapsesToTheInvestor)
+  , ("Adversarial.venueCannotEscapeTheRegulator", Test.Adversarial.venueCannotEscapeTheRegulator)
+  , ("Controls.housekeeping", Test.Controls.housekeeping)
   , ("Controls.noSinglePartyCanRewriteTheBook", Test.Controls.noSinglePartyCanRewriteTheBook)
   , ("Portfolio.breachingPortfolioStopsSubscriptionsOnly", Test.Portfolio.breachingPortfolioStopsSubscriptionsOnly)
   , ("Portfolio.eachLimitIsEnforced", Test.Portfolio.eachLimitIsEnforced)

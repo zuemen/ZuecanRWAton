@@ -11,6 +11,7 @@ module Zuecan.Cash
   , Merge (..)
   , Lock (..)
   , PayOut (..)
+  , Commit (..)
   , Release (..)
   , Reclaim (..)
   ) where
@@ -70,7 +71,7 @@ template CashHolding
           (lockAmount > 0.0 && lockAmount <= amount)
         locked <- create LockedCash with
           issuer, owner, currency, amount = lockAmount
-          lockedTo, payee, releaseAfter, purpose
+          lockedTo, payee, releaseAfter, purpose, committed = False
         change <- if lockAmount == amount
           then pure None
           else Some <$> create this with amount = amount - lockAmount
@@ -94,6 +95,7 @@ template LockedCash
     payee : Party
     releaseAfter : Time
     purpose : Text
+    committed : Bool  -- ^ already pledged to one trade (SellOrder.Take)
   where
     signatory issuer
     observer owner, lockedTo, payee
@@ -105,6 +107,14 @@ template LockedCash
         now <- getTime
         assertMsg "the lock has lapsed; only the owner can reclaim it now" (now < releaseAfter)
         create CashHolding with issuer, owner = payee, currency, amount
+
+    -- | Pledge the lock to one trade. Consuming, and refused on a lock that is
+    --   already pledged, so one lock cannot back two matched trades.
+    choice Commit : ContractId LockedCash
+      controller owner
+      do
+        assertMsg "this cash lock already backs a trade" (not committed)
+        create this with committed = True
 
     choice Release : ContractId CashHolding
       controller lockedTo

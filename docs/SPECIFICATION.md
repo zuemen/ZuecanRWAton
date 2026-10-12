@@ -599,7 +599,7 @@ sequenceDiagram
 
 > 本節由 `scripts/spec_extract.py` 從 `main/daml/Zuecan/*.daml` 產生，請勿手改；改程式碼後重新產生。
 
-共 22 個 template、49 個 choice（不含內建 `Archive`）、52 條 choice 內的前置條件，另加 §C.0 輔助函式的檢查。
+共 23 個 template、59 個 choice（不含內建 `Archive`）、63 條 choice 內的前置條件，另加 §C.0 輔助函式的檢查。
 
 ### C.0 共用檢查（輔助函式）
 
@@ -718,10 +718,12 @@ Cash in escrow. The owner keeps a way out (Reclaim after `releaseAfter`) and `lo
 | `payee` | `Party` |  |
 | `releaseAfter` | `Time` |  |
 | `purpose` | `Text` |  |
+| `committed` | `Bool` | already pledged to one trade (SellOrder.Take) |
 
 | choice | controller | 消耗 | 參數 | 前置條件（失敗訊息） | 效果 |
 |---|---|---|---|---|---|
 | `PayOut` | `lockedTo, owner` | 是 | — | `the lock has lapsed; only the owner can reclaim it now` | create CashHolding |
+| `Commit` | `owner` | 是 | — | `this cash lock already backs a trade` | create (new version) |
 | `Release` | `lockedTo` | 是 | — | — | create CashHolding |
 | `Reclaim` | `owner` | 是 | — | `cash is still locked` | create CashHolding |
 
@@ -886,7 +888,7 @@ The register of record. Every issuance and redemption goes through it, so `outst
 |---|---|---|---|---|---|
 | `SplitUnits` | `owner` | 是 | `amount : Decimal` | `the holding is frozen`<br>`split amount must be strictly between zero and the holding` | create (new version) |
 | `MergeUnits` | `owner` | 是 | `otherCid : ContractId FundHolding` | `can only merge holdings of the same instrument and owner`<br>`the holding is frozen` | archive (fetched contract)<br>create (new version) |
-| `OfferTransfer` | `owner` | 是 | `receiver : Party`<br>`amount : Decimal` | ＋`carveOut` | create TransferOffer<br>create FundHolding (remainder) |
+| `OfferTransfer` | `owner` | 是 | `receiver : Party`<br>`amount : Decimal`<br>`termsCid : ContractId FundTerms`<br>`credentialCid : ContractId InvestorCredential` | ＋`checkTermsFor`<br>＋`checkScreened`<br>＋`carveOut` | create TransferOffer<br>create FundHolding (remainder) |
 | `ListForSale` | `owner` | 是 | `buyer : Party`<br>`operator : Party`<br>`amount : Decimal`<br>`price : Decimal`<br>`cashIssuer : Party`<br>`currency : Text`<br>`expiresAt : Time`<br>`settleWithin : RelTime` | `price must be positive`<br>`the settlement window must be positive`<br>`cannot sell to yourself`<br>＋`carveOut` | create SellOrder<br>create FundHolding (remainder) |
 | `RequestRedemption` | `owner` | 是 | `amount : Decimal` | ＋`carveOut` | create RedemptionRequest<br>create FundHolding (remainder) |
 | `Freeze` | `instrument.registrar` | 是 | `reason : Text` | — | create (new version)<br>create EnforcementRecord |
@@ -912,6 +914,7 @@ The register of record. Every issuance and redemption goes through it, so `outst
 | `AcceptTransfer` | `receiver` | 是 | `termsCid : ContractId FundTerms`<br>`credentialCid : ContractId InvestorCredential` | ＋`checkTermsFor`<br>＋`checkEligible` | create FundHolding |
 | `DeclineTransfer` | `receiver` | 是 | — | — | create FundHolding |
 | `WithdrawTransfer` | `sender` | 是 | — | — | create FundHolding |
+| `RecallOffer` | `instrument.registrar` | 是 | `legalOrderRef : Text` | `a legal order reference is required` | — |
 
 #### `SellOrder`
 
@@ -937,8 +940,9 @@ A firm quote to one buyer. Taking it requires the buyer to have locked exactly t
 
 | choice | controller | 消耗 | 參數 | 前置條件（失敗訊息） | 效果 |
 |---|---|---|---|---|---|
-| `Take` | `buyer` | 是 | `lockedCashCid : ContractId Cash.LockedCash` | `the order has expired`<br>`locked cash does not match the order`<br>`the cash lock must lapse exactly at the settlement deadline` | create MatchedTrade |
+| `Take` | `buyer` | 是 | `lockedCashCid : ContractId Cash.LockedCash` | `the order has expired`<br>`locked cash does not match the order`<br>`the cash lock must lapse exactly at the settlement deadline` | exercise Commit<br>create MatchedTrade |
 | `CancelOrder` | `seller` | 是 | — | — | create FundHolding |
+| `RecallOrder` | `instrument.registrar` | 是 | `legalOrderRef : Text` | `a legal order reference is required` | — |
 
 #### `MatchedTrade`
 
@@ -965,9 +969,10 @@ Both sides committed; the venue settles delivery-versus-payment in one transacti
 
 | choice | controller | 消耗 | 參數 | 前置條件（失敗訊息） | 效果 |
 |---|---|---|---|---|---|
-| `Settle` | `operator` | 是 | `marketCid : ContractId MarketControl`<br>`termsCid : ContractId FundTerms`<br>`navCid : ContractId NavReport`<br>`buyerCredentialCid : ContractId InvestorCredential`<br>`sellerCredentialCid : ContractId InvestorCredential` | `the settlement deadline has passed`<br>`market control is for another venue or instrument`<br>`the market is not trading: `<br>`the trade exceeds the venue's per-trade size cap`<br>`this venue is not the fund's approved venue`<br>`the regulator on the trade is not the fund's regulator`<br>`settlement cash is not the fund's settlement asset`<br>`the price is outside the venue's band around NAV`<br>＋`checkTermsFor`<br>＋`checkNav`<br>＋`checkEligible`<br>＋`checkScreened` | exercise PayOut<br>create TradePrint<br>create RegulatoryTradeReport<br>create FundHolding |
+| `Settle` | `operator` | 是 | `marketCid : ContractId MarketControl`<br>`termsCid : ContractId FundTerms`<br>`navCid : ContractId NavReport`<br>`buyerCredentialCid : ContractId InvestorCredential`<br>`sellerCredentialCid : ContractId InvestorCredential` | `the settlement deadline has passed`<br>`market control is for another venue or instrument`<br>`the market control is not co-signed by the fund's regulator`<br>`the market is not trading: `<br>`the trade exceeds the venue's per-trade size cap`<br>`this venue is not the fund's approved venue`<br>`the regulator on the trade is not the fund's regulator`<br>`settlement cash is not the fund's settlement asset`<br>`the price is outside the venue's band around NAV`<br>＋`checkTermsFor`<br>＋`checkNav`<br>＋`checkEligible`<br>＋`checkScreened` | exercise PayOut<br>create TradePrint<br>create RegulatoryTradeReport<br>create FundHolding |
 | `Unwind` | `operator` | 是 | `reason : Text` | — | exercise Release<br>create FundHolding |
 | `Abort` | `actor` | 是 | `actor : Party` | `only a counterparty can abort`<br>`the venue still has until the deadline to settle` | create FundHolding |
+| `RecallTrade` | `instrument.registrar` | 是 | `legalOrderRef : Text` | `a legal order reference is required` | — |
 
 #### `RedemptionRequest`
 
@@ -988,6 +993,7 @@ Both sides committed; the venue settles delivery-versus-payment in one transacti
 | `ApproveRedemption` | `instrument.registrar` | 是 | `termsCid : ContractId FundTerms`<br>`navCid : ContractId NavReport`<br>`credentialCid : ContractId InvestorCredential` | `below the fund's minimum redemption`<br>`the redemption is worth less than one cent`<br>＋`checkTermsFor`<br>＋`checkNav`<br>＋`checkScreened` | create RedemptionPayout |
 | `RejectRedemption` | `instrument.registrar` | 是 | `reason : Text` | — | create FundHolding |
 | `CancelRedemption` | `investor` | 是 | — | — | create FundHolding |
+| `RecallRedemption` | `instrument.registrar` | 是 | `legalOrderRef : Text` | `a legal order reference is required` | — |
 
 #### `RedemptionPayout`
 
@@ -1005,12 +1011,16 @@ The transfer agent has struck the price; the custodian pays out of the fund's ca
 | `units` | `Decimal` |  |
 | `cashAmount` | `Decimal` |  |
 | `navPerUnit` | `Decimal` |  |
+| `navSeq` | `Int` | the NAV report the price was struck at |
 | `approvedAt` | `Time` |  |
+| `payBy` | `Time` | after this the investor can take the units back |
 
 | choice | controller | 消耗 | 參數 | 前置條件（失敗訊息） | 效果 |
 |---|---|---|---|---|---|
-| `Pay` | `custodian` | 是 | `cashCid : ContractId Cash.CashHolding`<br>`registerCid : ContractId FundRegister`<br>`termsCid : ContractId FundTerms`<br>`navCid : ContractId NavReport` | `payment must be in the fund's settlement asset`<br>＋`checkTermsFor` | exercise Transfer<br>exercise RecordRedemption |
+| `Pay` | `custodian` | 是 | `cashCid : ContractId Cash.CashHolding`<br>`registerCid : ContractId FundRegister`<br>`termsCid : ContractId FundTerms`<br>`navCid : ContractId NavReport`<br>`credentialCid : ContractId InvestorCredential` | `the payout has lapsed; the investor can take the units back`<br>`the payout was priced at a NAV that is no longer current; cancel and re-approve it`<br>`payment must be the custodian's own cash in the fund's settlement asset`<br>＋`checkTermsFor`<br>＋`checkScreened` | exercise Transfer<br>exercise RecordRedemption |
 | `CancelPayout` | `instrument.registrar` | 是 | `reason : Text` | — | create FundHolding |
+| `ReclaimUnits` | `investor` | 是 | — | `the custodian still has until payBy to pay` | create FundHolding |
+| `RecallPayout` | `instrument.registrar` | 是 | `legalOrderRef : Text` | `a legal order reference is required` | — |
 
 #### `EnforcementRecord`
 
@@ -1033,10 +1043,10 @@ Audit trail of freezes, unfreezes and seizures.
 
 #### `MarketControl`
 
-Venue-level switches for one instrument. A halt the regulator imposes can only be lifted by the regulator.
+Venue-level switches for one instrument. Signed by the venue and the regulator, so the venue cannot archive a halted control and trade under a fresh one of its own. A halt the regulator imposes can only be lifted by the regulator; the venue can tighten the price band and size cap on its own, loosening them takes the regulator.
 
-- **signatory**：`operator`
-- **observer**：`regulator, instrument.registrar, readers`
+- **signatory**：`operator, regulator`
+- **observer**：`instrument.registrar, readers`
 - **ensure**：`maxTradeUnits > 0.0 && maxDeviationBps >= 0.0`
 
 | 欄位 | 型別 | 說明 |
@@ -1055,7 +1065,24 @@ Venue-level switches for one instrument. A halt the regulator imposes can only b
 | `OperatorResume` | `operator` | 是 | — | `only the regulator can lift a regulatory halt`<br>`the market is already trading` | create (new version) |
 | `RegulatorHalt` | `regulator` | 是 | `reason : Text` | — | create (new version) |
 | `RegulatorResume` | `regulator` | 是 | — | `there is no regulatory halt to lift` | create (new version) |
-| `SetLimits` | `operator` | 是 | `newMaxTradeUnits : Decimal`<br>`newMaxDeviationBps : Decimal` | — | create (new version) |
+| `SetLimits` | `operator` | 是 | `newMaxTradeUnits : Decimal`<br>`newMaxDeviationBps : Decimal` | `the venue can only tighten its limits; loosening them takes the regulator` | create (new version) |
+| `RegulatorSetLimits` | `regulator` | 是 | `newMaxTradeUnits : Decimal`<br>`newMaxDeviationBps : Decimal` | — | create (new version) |
+
+#### `MarketProposal`
+
+The venue asks the regulator to approve its market for an instrument.
+
+- **signatory**：`control.operator`
+- **observer**：`control.regulator`
+
+| 欄位 | 型別 | 說明 |
+|---|---|---|
+| `control` | `MarketControl` |  |
+
+| choice | controller | 消耗 | 參數 | 前置條件（失敗訊息） | 效果 |
+|---|---|---|---|---|---|
+| `AcceptMarket` | `control.regulator` | 是 | — | — | create (control) |
+| `RejectMarket` | `control.regulator` | 是 | `reason : Text` | — | — |
 
 #### `TradePrint`
 

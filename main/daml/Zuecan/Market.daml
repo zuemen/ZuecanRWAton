@@ -6,6 +6,7 @@
 module Zuecan.Market
   ( MarketStatus (..)
   , MarketControl (..)
+  , MarketProposal (..)
   , TradePrint (..)
   , RegulatoryTradeReport (..)
   , OperatorHalt (..)
@@ -13,6 +14,9 @@ module Zuecan.Market
   , RegulatorHalt (..)
   , RegulatorResume (..)
   , SetLimits (..)
+  , RegulatorSetLimits (..)
+  , AcceptMarket (..)
+  , RejectMarket (..)
   ) where
 
 import Zuecan.Types
@@ -23,8 +27,11 @@ data MarketStatus
   | HaltedByRegulator with reason : Text
   deriving (Eq, Show)
 
--- | Venue-level switches for one instrument. A halt the regulator imposes can
---   only be lifted by the regulator.
+-- | Venue-level switches for one instrument. Signed by the venue and the
+--   regulator, so the venue cannot archive a halted control and trade under a
+--   fresh one of its own. A halt the regulator imposes can only be lifted by
+--   the regulator; the venue can tighten the price band and size cap on its
+--   own, loosening them takes the regulator.
 template MarketControl
   with
     operator : Party
@@ -35,8 +42,8 @@ template MarketControl
     maxTradeUnits : Decimal   -- ^ per-trade size cap
     maxDeviationBps : Decimal -- ^ price band around NAV
   where
-    signatory operator
-    observer regulator, instrument.registrar, readers
+    signatory operator, regulator
+    observer instrument.registrar, readers
     ensure maxTradeUnits > 0.0 && maxDeviationBps >= 0.0
 
     choice OperatorHalt : ContractId MarketControl
@@ -69,12 +76,41 @@ template MarketControl
           HaltedByRegulator _ -> create this with status = Trading
           _ -> abort "there is no regulatory halt to lift"
 
+    -- | The venue may only tighten its limits on its own.
     choice SetLimits : ContractId MarketControl
       with
         newMaxTradeUnits : Decimal
         newMaxDeviationBps : Decimal
       controller operator
+      do
+        assertMsg "the venue can only tighten its limits; loosening them takes the regulator"
+          (newMaxTradeUnits <= maxTradeUnits && newMaxDeviationBps <= maxDeviationBps)
+        create this with maxTradeUnits = newMaxTradeUnits, maxDeviationBps = newMaxDeviationBps
+
+    choice RegulatorSetLimits : ContractId MarketControl
+      with
+        newMaxTradeUnits : Decimal
+        newMaxDeviationBps : Decimal
+      controller regulator
       do create this with maxTradeUnits = newMaxTradeUnits, maxDeviationBps = newMaxDeviationBps
+
+-- | The venue asks the regulator to approve its market for an instrument.
+template MarketProposal
+  with
+    control : MarketControl
+  where
+    signatory control.operator
+    observer control.regulator
+
+    choice AcceptMarket : ContractId MarketControl
+      controller control.regulator
+      do create control
+
+    choice RejectMarket : ()
+      with
+        reason : Text
+      controller control.regulator
+      do pure ()
 
 -- | Public post-trade transparency: price and size, no identities.
 template TradePrint

@@ -85,7 +85,7 @@ onboard p investor cls jurisdiction = do
     exerciseCmd req Approve with
       grantedClass = cls
       validFor = days 365
-      relying = [p.ta, p.operator]
+      relying = [p.ta, p.operator, p.custodian]
       regulator = p.regulator
 
 fundTerms : Parties -> InstrumentId -> FundTerms
@@ -133,15 +133,18 @@ setup = do
     createCmd RegisterProposal with
       instrument, custodian = p.custodian, regulator = p.regulator, readers = [p.public]
   registerCid <- submit p.custodian do exerciseCmd proposal AcceptAppointment
-  marketCid <- submit p.operator do
-    createCmd MarketControl with
-      operator = p.operator
-      regulator = p.regulator
-      instrument
-      readers = [p.public]
-      status = Trading
-      maxTradeUnits = 50000.0
-      maxDeviationBps = 50.0
+  -- The venue proposes its market; the regulator co-signs it.
+  marketProposal <- submit p.operator do
+    createCmd MarketProposal with
+      control = MarketControl with
+        operator = p.operator
+        regulator = p.regulator
+        instrument
+        readers = [p.public]
+        status = Trading
+        maxTradeUnits = 50000.0
+        maxDeviationBps = 50.0
+  marketCid <- submit p.regulator do exerciseCmd marketProposal AcceptMarket
 
   aliceCred <- onboard p p.alice Accredited "US"
   bobCred <- onboard p p.bob Professional "TW"

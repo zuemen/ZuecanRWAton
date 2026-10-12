@@ -195,19 +195,19 @@ takeRequiresAMatchingLock = do
 transfersNeedAnEligibleReceiver : Script ()
 transfersNeedAnEligibleReceiver = do
   (w, holding) <- funded
-  (offer, Some rest) <- submit w.p.alice do
-    exerciseCmd holding OfferTransfer with receiver = w.p.carol, amount = 1000.0
+  (offer, Some rest) <- submit (actAs w.p.alice <> readAs w.p.public) do
+    exerciseCmd holding OfferTransfer with receiver = w.p.carol, amount = 1000.0, termsCid = w.termsCid, credentialCid = w.aliceCred
   -- Carol reads the public terms but is retail.
   expectFailureAs "investor class is not eligible" (actAs w.p.carol <> readAs w.p.public) do
     exerciseCmd offer AcceptTransfer with termsCid = w.termsCid, credentialCid = w.carolCred
   back <- submit w.p.carol do exerciseCmd offer DeclineTransfer
-  (offer, _) <- submit w.p.alice do exerciseCmd back OfferTransfer with receiver = w.p.bob, amount = 1000.0
+  (offer, _) <- submit (actAs w.p.alice <> readAs w.p.public) do exerciseCmd back OfferTransfer with receiver = w.p.bob, amount = 1000.0, termsCid = w.termsCid, credentialCid = w.aliceCred
   checkReconciles w
   received <- submit (actAs w.p.bob <> readAs w.p.public) do
     exerciseCmd offer AcceptTransfer with termsCid = w.termsCid, credentialCid = w.bobCred
   Some r <- queryContractId w.p.bob received
   assertMsg "bob received the units" (r.owner == w.p.bob && r.units == 1000.0)
-  (offer, _) <- submit w.p.alice do exerciseCmd rest OfferTransfer with receiver = w.p.bob, amount = 1.0
+  (offer, _) <- submit (actAs w.p.alice <> readAs w.p.public) do exerciseCmd rest OfferTransfer with receiver = w.p.bob, amount = 1.0, termsCid = w.termsCid, credentialCid = w.aliceCred
   _ <- submit w.p.alice do exerciseCmd offer WithdrawTransfer
   checkReconciles w
 

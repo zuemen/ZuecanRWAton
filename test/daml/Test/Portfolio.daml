@@ -79,14 +79,14 @@ breachingPortfolioStopsSubscriptionsOnly = do
     exerciseCmd redeemReq ApproveRedemption with termsCid = w.termsCid, navCid = w.navCid, credentialCid = w.aliceCred
   custodianCash <- largestCash w.p.custodian
   (_, registerCid) <- submit w.p.custodian do
-    exerciseCmd payout Pay with cashCid = custodianCash, registerCid = w.registerCid, termsCid = w.termsCid, navCid = w.navCid
+    exerciseCmd payout Pay with cashCid = custodianCash, registerCid = w.registerCid, termsCid = w.termsCid, navCid = w.navCid, credentialCid = w.aliceCred
   let w' = w with registerCid
 
   w' <- attest w' 98957.5 "statement-rebalanced"
-  _ <- submit w.p.ta do
+  (_, registerCid, _) <- submit w.p.ta do
     exerciseCmd req SettleSubscription with
       termsCid = w'.termsCid, registerCid = w'.registerCid, navCid = w'.navCid, credentialCid = w'.bobCred
-  pure ()
+  checkReconciles w' with registerCid
 
 -- | Each remaining limit, one breach at a time.
 eachLimitIsEnforced : Script ()

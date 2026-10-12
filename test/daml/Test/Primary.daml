@@ -70,7 +70,7 @@ underReservedFundStopsIssuingAndRedeeming = do
     exerciseCmd redeemReq ApproveRedemption with termsCid = w.termsCid, navCid = w.navCid, credentialCid = w.aliceCred
   custodianCash <- largestCash w.p.custodian
   expectFailure "reserves are below liabilities" w.p.custodian do
-    exerciseCmd payout Pay with cashCid = custodianCash, registerCid = w.registerCid, termsCid = w.termsCid, navCid = w.navCid
+    exerciseCmd payout Pay with cashCid = custodianCash, registerCid = w.registerCid, termsCid = w.termsCid, navCid = w.navCid, credentialCid = w.aliceCred
 
   -- The administrator reprices the units to what the assets are worth.
   w <- republishNav w 0.9300
@@ -84,7 +84,7 @@ underReservedFundStopsIssuingAndRedeeming = do
   payout <- submit w.p.ta do
     exerciseCmd redeemReq ApproveRedemption with termsCid = w.termsCid, navCid = w.navCid, credentialCid = w.aliceCred
   (_, registerCid) <- submit w.p.custodian do
-    exerciseCmd payout Pay with cashCid = custodianCash, registerCid = w.registerCid, termsCid = w.termsCid, navCid = w.navCid
+    exerciseCmd payout Pay with cashCid = custodianCash, registerCid = w.registerCid, termsCid = w.termsCid, navCid = w.navCid, credentialCid = w.aliceCred
   let w' = w with registerCid
   aliceCash <- cashOf w.p.alice
   assertMsg "alice was paid at the corrected NAV" (aliceCash == 900000.0 + floor6 (10000.0 * 0.9300))
@@ -130,16 +130,18 @@ staleAttestationOrForeignNavBlocksRedemption = do
       navPerUnit = 2.0, asOf = now, seq = 1, methodologyRef = "made up"
   expectFailure "not struck by the fund's NAV agent" w.p.ta do
     exerciseCmd req ApproveRedemption with termsCid = w.termsCid, navCid = rogueNav, credentialCid = w.aliceCred
-  payout <- submit w.p.ta do
-    exerciseCmd req ApproveRedemption with termsCid = w.termsCid, navCid = w.navCid, credentialCid = w.aliceCred
+  -- A day and a half later the NAV is fresh again but the custodian has
+  -- not attested since the appointment.
   advanceTime w (hours 31)
   w <- republishNav w launchNav
+  payout <- submit w.p.ta do
+    exerciseCmd req ApproveRedemption with termsCid = w.termsCid, navCid = w.navCid, credentialCid = w.aliceCred
   custodianCash <- largestCash w.p.custodian
   expectFailure "reserve attestation is out of date" w.p.custodian do
-    exerciseCmd payout Pay with cashCid = custodianCash, registerCid = w.registerCid, termsCid = w.termsCid, navCid = w.navCid
+    exerciseCmd payout Pay with cashCid = custodianCash, registerCid = w.registerCid, termsCid = w.termsCid, navCid = w.navCid, credentialCid = w.aliceCred
   w <- attest w 100000.0 "custodian-statement-day-2"
   (_, registerCid) <- submit w.p.custodian do
-    exerciseCmd payout Pay with cashCid = custodianCash, registerCid = w.registerCid, termsCid = w.termsCid, navCid = w.navCid
+    exerciseCmd payout Pay with cashCid = custodianCash, registerCid = w.registerCid, termsCid = w.termsCid, navCid = w.navCid, credentialCid = w.aliceCred
   checkReconciles w with registerCid
 
 -- | An investor whose screening has lapsed cannot redeem until re-screened.
@@ -261,10 +263,10 @@ staleScreeningMustBeRedone = do
       termsCid = w.termsCid, registerCid = w.registerCid, navCid = w.navCid, credentialCid = w.bobCred
   bobCred <- submit w.p.compliance do
     exerciseCmd w.bobCred Rescreen with newEvidenceHash = "sha256:rescreen-q1", validFor = days 365
-  _ <- submit w.p.ta do
+  (_, registerCid, _) <- submit w.p.ta do
     exerciseCmd req SettleSubscription with
       termsCid = w.termsCid, registerCid = w.registerCid, navCid = w.navCid, credentialCid = bobCred
-  pure ()
+  checkReconciles w with registerCid
 
 -- | The investor escrows cash; if the transfer agent rejects, it comes back
 --   at once, and if nobody acts the investor reclaims it after the lock.
@@ -312,7 +314,7 @@ redemptionPaysAtNavAndRetiresUnits = do
   checkReconciles w
   custodianCash <- largestCash w.p.custodian
   (_, registerCid) <- submit w.p.custodian do
-    exerciseCmd payout Pay with cashCid = custodianCash, registerCid = w.registerCid, termsCid = w.termsCid, navCid = w.navCid
+    exerciseCmd payout Pay with cashCid = custodianCash, registerCid = w.registerCid, termsCid = w.termsCid, navCid = w.navCid, credentialCid = w.aliceCred
   let w' = w with registerCid
   aliceCash <- cashOf w.p.alice
   assertMsg "paid at the new NAV" (aliceCash == 900000.0 + floor6 (20000.0 * 1.0426))
@@ -350,11 +352,11 @@ fundStatusGatesFlows = do
   registerCid <- submit w.p.ta do exerciseCmd w'.registerCid SetStatus with newStatus = Suspended
   custodianCash <- largestCash w.p.custodian
   expectFailure "the fund is suspended" w.p.custodian do
-    exerciseCmd payout Pay with cashCid = custodianCash, registerCid, termsCid = w'.termsCid, navCid = w'.navCid
+    exerciseCmd payout Pay with cashCid = custodianCash, registerCid, termsCid = w'.termsCid, navCid = w'.navCid, credentialCid = w'.aliceCred
   registerCid <- submit w.p.ta do exerciseCmd registerCid SetStatus with newStatus = SubscriptionsSuspended
-  _ <- submit w.p.custodian do
-    exerciseCmd payout Pay with cashCid = custodianCash, registerCid, termsCid = w'.termsCid, navCid = w'.navCid
-  pure ()
+  (_, registerCid) <- submit w.p.custodian do
+    exerciseCmd payout Pay with cashCid = custodianCash, registerCid, termsCid = w'.termsCid, navCid = w'.navCid, credentialCid = w'.aliceCred
+  checkReconciles w with registerCid
 
 -- | Terms are co-signed by the regulator: the transfer agent can only
 --   propose. Approving an amendment archives the old version, so a flow

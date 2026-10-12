@@ -37,6 +37,7 @@ export const T = {
   RedemptionPayout: `${pkg}:Zuecan.Registry:RedemptionPayout`,
   EnforcementRecord: `${pkg}:Zuecan.Registry:EnforcementRecord`,
   MarketControl: `${pkg}:Zuecan.Market:MarketControl`,
+  MarketProposal: `${pkg}:Zuecan.Market:MarketProposal`,
   TradePrint: `${pkg}:Zuecan.Market:TradePrint`,
   RegulatoryTradeReport: `${pkg}:Zuecan.Market:RegulatoryTradeReport`,
   SubscriptionRequest: `${pkg}:Zuecan.Subscription:SubscriptionRequest`,
@@ -136,16 +137,22 @@ export async function launchFund(ledger: Ledger, roles: Roles, symbol: string, n
   ]);
   const registerCid = createdOf(registerTx, T.FundRegister).contractId;
 
-  const marketTx = await ledger.submit([roles.operator], [
-    create(T.MarketControl, {
-      operator: roles.operator,
-      regulator: roles.regulator,
-      instrument,
-      readers: [roles.public],
-      status: { tag: "Trading", value: {} },
-      maxTradeUnits: decimal(50_000),
-      maxDeviationBps: decimal(50),
+  // The venue proposes its market; the regulator co-signs it.
+  const marketProposalTx = await ledger.submit([roles.operator], [
+    create(T.MarketProposal, {
+      control: {
+        operator: roles.operator,
+        regulator: roles.regulator,
+        instrument,
+        readers: [roles.public],
+        status: { tag: "Trading", value: {} },
+        maxTradeUnits: decimal(50_000),
+        maxDeviationBps: decimal(50),
+      },
     }),
+  ]);
+  const marketTx = await ledger.submit([roles.regulator], [
+    exercise(T.MarketProposal, createdOf(marketProposalTx, T.MarketProposal).contractId, "AcceptMarket"),
   ]);
   const marketCid = createdOf(marketTx, T.MarketControl).contractId;
   return { roles, instrument, termsCid, navCid, registerCid, marketCid };
@@ -167,7 +174,7 @@ export async function onboard(ledger: Ledger, fund: Fund, investor: Party, inves
     exercise(T.CredentialRequest, createdOf(reqTx, T.CredentialRequest).contractId, "Approve", {
       grantedClass: investorClass,
       validFor: days(365),
-      relying: [roles.ta, roles.operator],
+      relying: [roles.ta, roles.operator, roles.custodian],
       regulator: roles.regulator,
     }),
   ]);
@@ -305,7 +312,7 @@ export async function redeem(ledger: Ledger, fund: Fund, investor: Party, holdin
   const cash = await largestCash(ledger, roles.custodian);
   const payTx = await ledger.submit([roles.custodian], [
     exercise(T.RedemptionPayout, createdOf(approveTx, T.RedemptionPayout).contractId, "Pay", {
-      cashCid: cash.cid, registerCid: fund.registerCid, termsCid: fund.termsCid, navCid: fund.navCid,
+      cashCid: cash.cid, registerCid: fund.registerCid, termsCid: fund.termsCid, navCid: fund.navCid, credentialCid,
     }),
   ]);
   fund.registerCid = createdOf(payTx, T.FundRegister).contractId;
