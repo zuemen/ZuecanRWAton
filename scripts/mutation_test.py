@@ -99,7 +99,7 @@ def run(mutant):
         open(path, "w").write(src.replace(old, new, 1))
         subprocess.run(["chmod", "-R", "a+rwX", work], check=True)
         cmd = ("daml build --all >build.log 2>&1 || { echo BUILD_FAIL; exit 0; }; "
-               "cd test && daml test 2>&1 | grep -E ': failed' | head -1")
+               "cd test && daml test 2>&1 | grep -E ': failed' | grep -v 'Canton.daml' | head -1")
         r = subprocess.run(["docker", "run", "--rm", "-v", f"{work}:/w", "-w", "/w", IMAGE, "sh", "-c", cmd],
                            capture_output=True, text=True)
         out = r.stdout.strip()
