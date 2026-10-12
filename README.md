@@ -73,6 +73,7 @@ sequenceDiagram
 scripts/daml-test.sh      # IDE ledger：全部情境＋覆蓋率門檻（約 30 秒）
 scripts/canton-test.sh    # 真正的 Canton participant：起 sandbox、上傳 DAR、依序跑全部情境（約 10 分鐘）
 scripts/mutation_test.py  # 突變測試（約 20 分鐘，3 路平行）
+scripts/app-test.sh       # JSON Ledger API 應用：在 Canton sandbox 上跑完整業務流程，產生監理檢視頁（約 2 分鐘）
 ```
 
 - `main/`：上帳本的合約（package `zuecan-rwa`）。**不依賴 daml-script**，可以上傳到 Canton participant，之後用 Smart Contract Upgrade 升級。
@@ -83,6 +84,19 @@ scripts/mutation_test.py  # 突變測試（約 20 分鐘，3 路平行）
 - **Canton 實跑**：同一批情境不只在模擬帳本（IDE ledger）上跑，也透過 Ledger API 在真正的 Canton sandbox participant（靜態時間）上跑，CI 每次都執行。
 - 每個失敗情境都用 `expectFailure` 比對錯誤訊息，確認是被**預期的那條規則**擋下。大部分情境結尾都跑 `checkReconciles`，確認監理機關看得到的所有份數（含託管中的）等於帳冊流通量。
 - 突變測試：逐一拿掉 62 條關鍵檢查或授權，每一條都至少讓一個測試失敗（結果見 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#測試與突變測試)）。
+
+## 應用程式：透過 JSON Ledger API 操作帳本
+
+`app/` 是一個不依賴任何 npm 套件的 TypeScript 程式（Node 22 直接執行），透過 Canton 的 **JSON Ledger API v2** 操作帳本，等於一個最小的後端：
+
+- `src/ledger.ts`：JSON Ledger API 用戶端（配置 party、送交易並等結果、查 active contract set）。
+- `src/zuecan.ts`：業務操作，一個函式對應一個業務步驟。包括發行基金（過戶代理提案、監理核准條款）、投資人開戶、申購、託管機構申報、在交易場所交割，以及贖回。
+- `src/flow.ts`：端到端流程，跑完後以監理機關的視角對帳並檢查 9 個條件：帳實相符、儲備足額、無投資組合違規、公眾看不到持有人與成交身分等。
+- `src/report.ts`：**監理檢視頁**（`app/out/regulator.html`），內容包括流通份數、NAV、覆蓋率、儲備聲明歷史與 Rule 2a-7 指標、持有人、成交。CI 每次都會產生，並保存為 artifact。
+
+```bash
+scripts/app-test.sh   # 起一個 wall-clock 的 Canton sandbox，上傳 DAR，跑 app/src/flow.ts
+```
 
 ## 目錄
 
@@ -103,6 +117,7 @@ test/daml/Test/
   Portfolio.daml      持倉申報與投資組合限制
   Controls.daml       單方不得改帳、帳冊外不得出現份數、雜項
   Canton.daml         依序執行全部情境（Canton 實跑用）
+app/                  JSON Ledger API 應用（後端操作、端到端流程、監理檢視頁）
 docs/
   ARCHITECTURE.md     設計、授權與隱私矩陣、不變式、取捨
   COMPLIANCE_MAPPING.md  SEC 創新豁免、Rule 2a-7、台灣規範對照
@@ -114,9 +129,11 @@ docs/
 已完成：
 - ~~在真正的 Canton participant 上跑~~：`scripts/canton-test.sh`，CI 每次執行。
 - ~~儲備聲明細項與 Rule 2a-7 限制~~：`Zuecan.Portfolio`。
+- ~~基金條款監理共簽~~：`TermsProposal`。
+- ~~透過 JSON Ledger API 的後端與監理檢視頁~~：`app/`。
 
 接下來：
 1. **Canton Network LocalNet**：用 Splice LocalNet（含 synchronizer 與多個 participant）跑同樣的流程，讓每個角色各自在不同節點。
 2. **對接 Canton Network 代幣標準**（CIP-0056，細節未查證），讓持有部位可以被錢包與其他應用辨識。
 3. **真實結算資產**：以 Canton 上的受監管穩定幣取代 `UsdIssuer` 替身。
-4. **前端與後端**：投資人入口、過戶代理後台、監理檢視頁（透過 JSON Ledger API）。
+4. **前端**：投資人入口、過戶代理後台（後端操作與監理檢視頁已有，見上方「應用程式」）。正式環境還需要 JWT 驗證與每個角色各自的使用者權限。

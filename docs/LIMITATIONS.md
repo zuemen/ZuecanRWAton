@@ -27,7 +27,7 @@
 
 15. **Daml SDK 版本是 3.4.0-rc2（發行候選版）。** 撰寫環境只能從 Docker Hub 取得 SDK，而 3.4 的穩定版只透過 `dpm` 發布。換成穩定版時，要重跑全部測試與突變測試。
 16. **還沒有部署到 Canton Network。** 全部情境都在 IDE ledger 和一個 Canton sandbox（單一 participant、靜態時間）上通過；還沒有在多節點、各角色分屬不同 participant 的環境（例如 Splice LocalNet）跑過，也沒有網路延遲等現實因素。
-17. **沒有前端、後端或錢包整合。**
+17. **沒有投資人前端與錢包整合。** `app/` 只有後端操作與一個靜態的監理檢視頁。它在沒有驗證的 sandbox 上以單一使用者送出所有角色的交易；正式環境每個角色要有自己的 participant 或使用者，並以 JWT 取得 `actAs` 權限。
 
 ## 未查證事項
 

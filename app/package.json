@@ -1,0 +1,15 @@
+{
+  "name": "zuecan-rwa-app",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Drives the ZuecanRWAton ledger model over the Canton JSON Ledger API v2",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "flow": "node src/flow.ts",
+    "regulator-view": "node src/regulator-view.ts",
+    "test": "node --test test/*.test.ts"
+  }
+}

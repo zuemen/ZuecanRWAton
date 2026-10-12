@@ -20,6 +20,7 @@ Tokenized government money-market fund on Canton, written in Daml 3.4. Read `REA
 scripts/daml-test.sh      # IDE ledger + coverage gate; needs Docker
 scripts/canton-test.sh    # same scenarios on a Canton sandbox participant (~10 min)
 scripts/mutation_test.py  # mutation test (~20 min)
+scripts/app-test.sh       # app/ end to end over the JSON Ledger API (~2 min)
 ```
 
 - Every new choice needs a scenario that exercises it. CI fails if any non-Archive choice is never exercised.
@@ -28,6 +29,11 @@ scripts/mutation_test.py  # mutation test (~20 min)
 - Mutation-test a new safety check: add it to `MUTANTS` in `scripts/mutation_test.py` and confirm it is killed.
 - Parties come from `freshParty`, never a fixed hint: on a real participant all scenarios share one ledger.
 - Move time with `advanceTime w`, never bare `passTime`: on a Canton participant a time jump drops the sequencer connections for a moment, and `advanceTime` waits until submissions go through again.
+
+## App (`app/`)
+
+- TypeScript run directly by Node >= 22.18 (type stripping): erasable syntax only, no enums or namespaces, and no npm dependencies.
+- Template ids use the package-name form (`#zuecan-rwa:Module:Entity`). When a template or choice argument changes in `main/`, update `app/src/zuecan.ts` and rerun `scripts/app-test.sh`.
 
 ## Environment
 
