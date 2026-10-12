@@ -95,7 +95,7 @@ staleAttestationOrNavBlocksIssuance : Script ()
 staleAttestationOrNavBlocksIssuance = do
   w <- setup
   (_, w) <- subscribe w w.p.alice w.aliceCred 100000.0
-  passTime (hours 31)
+  advanceTime w (hours 31)
   w <- republishNav w launchNav
   req <- requestSubscription w w.p.bob 50000.0
   let settle cid = exerciseCmd cid SettleSubscription with
@@ -103,7 +103,7 @@ staleAttestationOrNavBlocksIssuance = do
   expectFailure "reserve attestation is out of date" w.p.ta (settle req)
   w <- attest w 100000.0 "custodian-statement-day-2"
   -- And a NAV more than 30 hours old is refused as well.
-  passTime (hours 31)
+  advanceTime w (hours 31)
   w <- attest w 100000.0 "custodian-statement-day-3"
   req <- requestSubscription w w.p.bob 50000.0
   expectFailure "NAV is out of date" w.p.ta do
@@ -132,7 +132,7 @@ staleAttestationOrForeignNavBlocksRedemption = do
     exerciseCmd req ApproveRedemption with termsCid = w.termsCid, navCid = rogueNav, credentialCid = w.aliceCred
   payout <- submit w.p.ta do
     exerciseCmd req ApproveRedemption with termsCid = w.termsCid, navCid = w.navCid, credentialCid = w.aliceCred
-  passTime (hours 31)
+  advanceTime w (hours 31)
   w <- republishNav w launchNav
   custodianCash <- largestCash w.p.custodian
   expectFailure "reserve attestation is out of date" w.p.custodian do
@@ -147,7 +147,7 @@ redeemerMustBeScreened : Script ()
 redeemerMustBeScreened = do
   w <- setup
   (holding, w) <- subscribe w w.p.alice w.aliceCred 100000.0
-  passTime (days 91)
+  advanceTime w (days 91)
   w <- attest w 100000.0 "custodian-statement-q2"
   w <- republishNav w launchNav
   (req, _) <- submit w.p.alice do
@@ -240,7 +240,7 @@ expiredCredentialIsRefused = do
   daveCred <- submit w.p.compliance do
     exerciseCmd req Approve with
       grantedClass = Institutional, validFor = days 10, relying = [w.p.ta, w.p.operator], regulator = w.p.regulator
-  passTime (days 11)
+  advanceTime w (days 11)
   w <- attest w 0.0 "custodian-statement-empty-fund"
   w <- republishNav w launchNav
   sub <- requestSubscription w w.p.dave 50000.0
@@ -252,7 +252,7 @@ expiredCredentialIsRefused = do
 staleScreeningMustBeRedone : Script ()
 staleScreeningMustBeRedone = do
   w <- setup
-  passTime (days 91)
+  advanceTime w (days 91)
   w <- attest w 0.0 "custodian-statement-empty-fund"
   w <- republishNav w launchNav
   req <- requestSubscription w w.p.bob 50000.0
@@ -284,7 +284,7 @@ subscriptionCashIsNeverStuck = do
   -- the custodian on its own (that needs the investor's authority, which
   -- only the request carried) ...
   submitMustFail w.p.ta do exerciseCmd r.lockedCashCid PayOut
-  passTime (days 2)
+  advanceTime w (days 2)
   -- ... and after the lock lapses not even both of them together can.
   expectFailureAs "the lock has lapsed" (actAs [w.p.ta, w.p.bob]) do exerciseCmd r.lockedCashCid PayOut
   -- ... and the investor takes it back.
@@ -300,7 +300,7 @@ redemptionPaysAtNavAndRetiresUnits = do
   (holding, w) <- subscribe w w.p.alice w.aliceCred 100000.0
   w <- attest w 100000.0 "custodian-statement-day-1"
   -- A day of income.
-  passTime (days 1)
+  advanceTime w (days 1)
   w <- republishNav w 1.0426
   w <- attest w 100010.00 "custodian-statement-day-2"
 

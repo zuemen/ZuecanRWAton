@@ -153,7 +153,7 @@ counterpartiesCanWalkAwayAfterTheDeadline = do
   submitMustFail w.p.operator do exerciseCmd t.lockedCashCid PayOut
   expectFailure "still has until the deadline" w.p.alice do exerciseCmd trade Abort with actor = w.p.alice
   expectFailure "only a counterparty can abort" w.p.operator do exerciseCmd trade Abort with actor = w.p.operator
-  passTime (hours 2)
+  advanceTime w (hours 2)
   w <- republishNav w launchNav
   expectFailure "settlement deadline has passed" w.p.operator (settleCmd w trade)
   restored <- submit w.p.alice do exerciseCmd trade Abort with actor = w.p.alice
@@ -185,7 +185,7 @@ takeRequiresAMatchingLock = do
   expectFailure "locked cash does not match the order" w.p.bob do exerciseCmd order Take with lockedCashCid = short
   early <- lockFor 10430.0 (addRelTime now (minutes 30))
   expectFailure "lapse exactly at the settlement deadline" w.p.bob do exerciseCmd order Take with lockedCashCid = early
-  passTime (hours 1)
+  advanceTime w (hours 1)
   ok <- lockFor 10430.0 (addRelTime expiresAt (hours 1))
   expectFailure "the order has expired" w.p.bob do exerciseCmd order Take with lockedCashCid = ok
   _ <- submit w.p.alice do exerciseCmd order CancelOrder

@@ -27,6 +27,7 @@ scripts/mutation_test.py  # mutation test (~20 min)
 - End scenarios that move units with `checkReconciles w`. It asserts that the units the regulator sees, including units in escrow, equal the register's `outstanding`.
 - Mutation-test a new safety check: add it to `MUTANTS` in `scripts/mutation_test.py` and confirm it is killed.
 - Parties come from `freshParty`, never a fixed hint: on a real participant all scenarios share one ledger.
+- Move time with `advanceTime w`, never bare `passTime`: on a Canton participant a time jump drops the sequencer connections for a moment, and `advanceTime` waits until submissions go through again.
 
 ## Environment
 

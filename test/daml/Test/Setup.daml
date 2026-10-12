@@ -257,6 +257,33 @@ checkReconciles w = do
   assertMsg ("units on the ledger (" <> show total <> ") != register outstanding (" <> show reg.outstanding <> ")")
     (total == reg.outstanding)
 
+-- | A throwaway contract to probe whether the ledger accepts submissions.
+template Heartbeat
+  with
+    owner : Party
+  where
+    signatory owner
+
+-- | Move ledger time forward. On the IDE ledger this is just passTime. On a
+--   Canton participant with static time, a jump of hours or days makes the
+--   synchronizer drop and re-establish its sequencer connections, and
+--   submissions fail until it has; so wait until a probe goes through.
+advanceTime : World -> RelTime -> Script ()
+advanceTime w by = do
+  passTime by
+  waitForLedger w.p.ta 60
+
+waitForLedger : Party -> Int -> Script ()
+waitForLedger party attempts = do
+  result <- trySubmit party (createAndExerciseCmd (Heartbeat party) Archive)
+  case result of
+    Right _ -> pure ()
+    Left err
+      | attempts > 0 -> do
+          sleep (seconds 1)
+          waitForLedger party (attempts - 1)
+      | otherwise -> abort ("the ledger did not accept submissions after a time jump: " <> show err)
+
 -- | Submit and require it to fail with a message containing `needle`, so a
 --   test cannot pass because the command failed for some unrelated reason.
 expectFailure : Text -> Party -> Commands a -> Script ()
