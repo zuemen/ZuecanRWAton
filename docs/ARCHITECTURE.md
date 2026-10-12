@@ -158,19 +158,21 @@ scripts/canton-test.sh   # Canton sandbox participant：Test.Canton:allScenarios
   - **`daml script --all` 會平行執行腳本**，而靜態時間的時鐘是共用的，一個情境快轉時間會打壞另一個情境的期限。改成由 `Test.Canton:allScenarios` 依序執行。
   - **時間一次快轉數小時或數天後，synchronizer 會中斷並重建 sequencer 連線**，之後的第一筆交易會失敗（`SEQUENCER_REQUEST_FAILED`，接著是 `UNKNOWN_CONTRACT_SYNCHRONIZERS`）。`advanceTime` 快轉後會用一份 `Heartbeat` 合約探測，等到交易能送出再繼續。
 
-**突變測試**：逐一把 58 條關鍵檢查或授權拿掉（條件改成永遠成立、刪掉檢查，或少一個 signatory／controller），確認至少一個測試因此失敗。結果見下表（2026-10-12，Daml SDK 3.4.0-rc2）。
+**突變測試**：逐一把 62 條關鍵檢查或授權拿掉（條件改成永遠成立、刪掉檢查，或少一個 signatory／controller），確認至少一個測試因此失敗。結果見下表（2026-10-12，Daml SDK 3.4.0-rc2，最終程式碼）。
 
-| 突變 | 結果 | 第一個失敗的測試 |
+| 突變 | 結果 | 第一個失敗的情境 |
 |---|---|---|
 | abort actor | ✅ 被抓到 | `Secondary.counterpartiesCanWalkAwayAfterTheDeadline` |
 | abort deadline | ✅ 被抓到 | `Secondary.counterpartiesCanWalkAwayAfterTheDeadline` |
 | agency notes weekly liquid | ✅ 被抓到 | `Portfolio.eachLimitIsEnforced` |
+| amendment archives old terms | ✅ 被抓到 | `Primary.amendedTermsSupersedeOldOnes` |
 | buyer eligibility | ✅ 被抓到 | `Secondary.ineligibleBuyerCannotReceiveUnits` |
 | cash transfer bound | ✅ 被抓到 | `Controls.housekeeping` |
 | credential expiry | ✅ 被抓到 | `Primary.expiredCredentialIsRefused` |
 | credential issuer | ✅ 被抓到 | `Primary.ineligibleInvestorsCannotSubscribe` |
 | credential owner | ✅ 被抓到 | `Primary.ineligibleInvestorsCannotSubscribe` |
 | daily liquidity limit | ✅ 被抓到 | `Portfolio.eachLimitIsEnforced` |
+| first terms version | ✅ 被抓到 | `Primary.amendedTermsSupersedeOldOnes` |
 | frozen escrow | ✅ 被抓到 | `Secondary.freezeAndSeizeUnderLegalOrder` |
 | government share limit | ✅ 被抓到 | `Portfolio.eachLimitIsEnforced` |
 | holding custodian signature | ✅ 被抓到 | `Controls.noSinglePartyCanRewriteTheBook` |
@@ -213,6 +215,8 @@ scripts/canton-test.sh   # Canton sandbox participant：Test.Canton:allScenarios
 | settle deadline | ✅ 被抓到 | `Secondary.counterpartiesCanWalkAwayAfterTheDeadline` |
 | size cap | ✅ 被抓到 | `Secondary.priceBandAndSizeCap` |
 | take lock match | ✅ 被抓到 | `Secondary.takeRequiresAMatchingLock` |
+| terms keep instrument | ✅ 被抓到 | `Primary.amendedTermsSupersedeOldOnes` |
+| terms regulator co-sign | ✅ 被抓到 | `Primary.amendedTermsSupersedeOldOnes` |
 | terms version bump | ✅ 被抓到 | `Primary.amendedTermsSupersedeOldOnes` |
 | transfer receiver eligibility | ✅ 被抓到 | `Secondary.transfersNeedAnEligibleReceiver` |
 | unit rounding down | ✅ 被抓到 | `Controls.housekeeping` |
@@ -221,4 +225,4 @@ scripts/canton-test.sh   # Canton sandbox participant：Test.Canton:allScenarios
 | wam reset look-through | ✅ 被抓到 | `Portfolio.metricsFollowRule2a7Definitions` |
 | weekly liquidity limit | ✅ 被抓到 | `Portfolio.eachLimitIsEnforced` |
 
-**58／58 全部被抓到。** 重跑：`scripts/mutation_test.py`（需要 Docker，預設 3 路平行）；CI 每次用 `--check` 確認每個突變都還套得上目前的程式碼。
+**62／62 全部被抓到。** 重跑：`scripts/mutation_test.py`（需要 Docker，預設 3 路平行）；CI 每次用 `--check` 確認每個突變都還套得上目前的程式碼。
