@@ -119,7 +119,7 @@ setup = do
   let instrument = InstrumentId with registrar = p.ta, symbol = "ZTMMF"
   now <- getTime
 
-  termsCid <- submit p.ta do createCmd (fundTerms p instrument)
+  termsCid <- proposeTerms p (fundTerms p instrument) None "initial offering"
   navCid <- submit p.navAgent do
     createCmd NavReport with
       instrument
@@ -152,6 +152,12 @@ setup = do
       createCmd CashHolding with issuer = p.usd, owner = investor, currency = "USD", amount = 1000000.0
 
   pure World with ..
+
+-- | The transfer agent proposes terms; the regulator approves them.
+proposeTerms : Parties -> FundTerms -> Optional (ContractId FundTerms) -> Text -> Script (ContractId FundTerms)
+proposeTerms p proposed replaces rationale = do
+  proposal <- submit p.ta do createCmd TermsProposal with proposed, replaces, rationale
+  submit p.regulator do exerciseCmd proposal ApproveTerms
 
 -- | Escrow `amount` for the custodian and have the transfer agent settle it.
 subscribe : World -> Party -> ContractId InvestorCredential -> Decimal -> Script (ContractId FundHolding, World)

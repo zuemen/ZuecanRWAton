@@ -21,7 +21,8 @@
 | `Compliance:CredentialRevocation` | KYC 機構 | 投資人、監理 | 撤銷紀錄 |
 | `Cash:CashHolding` | 穩定幣發行人 | 持有人 | 發行人可凍結或銷毀，和法幣穩定幣一致 |
 | `Cash:LockedCash` | 穩定幣發行人 | 持有人、`lockedTo`、`payee` | 託管中的現金 |
-| `Fund:FundTerms` | 過戶代理 | 託管、行政、KYC、場所、監理、Public | 基金條款，`offeringDocHash` 指向公開說明書 |
+| `Fund:FundTerms` | **過戶代理＋監理** | 託管、行政、KYC、場所、Public | 基金條款，`offeringDocHash` 指向公開說明書 |
+| `Fund:TermsProposal` | 過戶代理 | 監理 | 首版條款或修訂提案，監理核准才生效 |
 | `Fund:NavReport` | 基金行政 | 過戶代理、`readers` | 每份只有一個有效版本 |
 | `Registry:RegisterProposal` | 過戶代理 | 託管 | 任命託管機構 |
 | `Registry:FundRegister` | **過戶代理＋託管** | 監理、Public | 雙簽帳冊 |
@@ -69,7 +70,7 @@ Canton 只把合約送到它的 stakeholder 所在的 participant，所以這張
 | I10b | 註銷份數需要過戶代理＋託管機構，且付款額必須為正（負數會虛增儲備覆蓋） | `RecordRedemption` 的 controller | 同上 |
 | I10c | 帳冊之外不可能出現份數：每份份數合約都要託管機構簽署，而託管機構只在帳冊的發行、以及已在帳冊上的份數移動時簽 | `FundHolding` 與所有份數託管合約的 signatory | 同上 |
 | I11 | 監理看得到的所有份數（含託管中）＝帳冊流通量 | 由 I10a–I10c 保證；監理端也能對帳 | 幾乎每個情境結尾的 `checkReconciles` |
-| I12 | 條款修訂後，舊條款立即失效 | 封存舊合約 | `amendedTermsSupersedeOldOnes` |
+| I12 | 條款只能經監理核准修訂；核准後舊條款立即失效 | `FundTerms` 由過戶代理＋監理簽署，修訂走 `TermsProposal.ApproveTerms`，同時封存舊版 | `amendedTermsSupersedeOldOnes` |
 | I13 | 儲備數字等於託管機構申報的持倉市值總和，不能另填 | `Attest` 由持倉計算 | `reserveIsTheSumOfPositions` |
 | I14 | 投資組合違反 Rule 2a-7 限制（WAM、WAL、最長到期、每日／每週流動資產、政府資產占比）時，停止新申購；違規項目公開；贖回不受影響 | `Attest` 記錄 `portfolioBreaches`，`RecordIssuance` 要求為空 | `breachingPortfolioStopsSubscriptionsOnly`、`eachLimitIsEnforced`、`metricsFollowRule2a7Definitions` |
 
@@ -111,6 +112,10 @@ Canton 3.x 不支援 contract key 的唯一性查詢。所以每個 choice 都�
 - 有違規時照樣記錄並公開（隱藏更糟），但停止新申購，直到託管機構申報合規的組合。
 
 營業日以日曆日近似；指標定義是撰寫者對 Rule 2a-7 的整理，引用前請對照 17 CFR 270.2a-7 原文。
+
+### 為什麼基金條款要監理機關共簽
+條款決定誰的 KYC 憑證算數、哪個交易場所能交割、結算資產是什麼、適用哪些投資組合限制。只由過戶代理簽署時，它可以一個人把 KYC 機構換成自己、放寬限制。
+現在條款由過戶代理和監理機關共同簽署：過戶代理只能提出 `TermsProposal`，監理核准（`ApproveTerms`）時才建立新版並封存舊版。
 
 ### 為什麼 NAV 是累積型
 貨幣基金有兩種做法。

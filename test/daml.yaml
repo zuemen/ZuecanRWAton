@@ -9,5 +9,10 @@ dependencies:
   - daml-prim
   - daml-stdlib
   - daml-script
+# Test.Setup defines a Heartbeat template for probing a Canton participant;
+# this DAR only ever goes to the test sandbox, so the daml-script dependency
+# that comes with it does not matter.
+build-options:
+  - -Wno-template-interface-depends-on-daml-script
 data-dependencies:
   - ../main/.daml/dist/zuecan-rwa-0.1.0.dar

@@ -24,8 +24,8 @@ noSinglePartyCanRewriteTheBook = do
   -- Even the transfer agent and custodian together cannot take an
   -- investor's units, or put units in an investor's name, without that
   -- investor: the owner is a signatory of every holding.
-  submitMultiMustFail [w.p.ta, w.p.custodian] [] do archiveCmd holding
-  submitMultiMustFail [w.p.ta, w.p.custodian] [] do
+  submitMustFail (actAs [w.p.ta, w.p.custodian]) do archiveCmd holding
+  submitMustFail (actAs [w.p.ta, w.p.custodian]) do
     createCmd FundHolding with
       instrument = w.instrument, custodian = w.p.custodian, owner = w.p.bob
       units = 1.0, frozen = False, regulator = w.p.regulator

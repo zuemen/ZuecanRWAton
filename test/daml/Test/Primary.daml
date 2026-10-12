@@ -356,14 +356,45 @@ fundStatusGatesFlows = do
     exerciseCmd payout Pay with cashCid = custodianCash, registerCid, termsCid = w'.termsCid, navCid = w'.navCid
   pure ()
 
--- | Amending the terms archives the old version, so a flow handed the old
---   terms fails rather than running under superseded rules.
+-- | Terms are co-signed by the regulator: the transfer agent can only
+--   propose. Approving an amendment archives the old version, so a flow
+--   handed the old terms fails rather than running under superseded rules.
 amendedTermsSupersedeOldOnes : Script ()
 amendedTermsSupersedeOldOnes = do
   w <- setup
   Some terms <- queryContractId w.p.ta w.termsCid
-  newTermsCid <- submit w.p.ta do
-    exerciseCmd w.termsCid Amend with newTerms = terms with minSubscription = 100000.0, version = 2
+  -- The transfer agent cannot replace the terms on its own: it cannot
+  -- archive them, and it cannot create terms the regulator has not signed.
+  submitMustFail w.p.ta do archiveCmd w.termsCid
+  submitMustFail w.p.ta do createCmd terms with version = 2, compliance = w.p.ta
+  -- A proposal the regulator rejects changes nothing.
+  rejected <- submit w.p.ta do
+    createCmd TermsProposal with
+      proposed = (terms with version = 2, compliance = w.p.ta)
+      replaces = Some w.termsCid, rationale = "self-certify KYC"
+  submit w.p.regulator do exerciseCmd rejected RejectTerms with reason = "the KYC agent must be independent"
+  -- A withdrawn proposal is gone too.
+  withdrawn <- submit w.p.ta do
+    createCmd TermsProposal with
+      proposed = (terms with version = 2), replaces = Some w.termsCid, rationale = "draft"
+  submit w.p.ta do exerciseCmd withdrawn WithdrawTerms
+  -- The regulator checks the version and that the instrument stays the same.
+  -- Moving the fund to another regulator fails on authority: archiving the
+  -- current terms needs the current regulator.
+  let badProposal t = submit w.p.ta do
+        createCmd TermsProposal with proposed = t, replaces = Some w.termsCid, rationale = "bad"
+  skip <- badProposal (terms with version = 3)
+  expectFailure "bump the version" w.p.regulator do exerciseCmd skip ApproveTerms
+  swapped <- badProposal (terms with version = 2, instrument = w.instrument with symbol = "OTHER")
+  expectFailure "cannot change the instrument" w.p.regulator do exerciseCmd swapped ApproveTerms
+  other <- freshParty "OtherRegulator"
+  moved <- badProposal (terms with version = 2, regulator = other)
+  submitMustFail other do exerciseCmd moved ApproveTerms
+  first <- submit w.p.ta do
+    createCmd TermsProposal with proposed = (terms with version = 2), replaces = None, rationale = "bad"
+  expectFailure "first terms must be version 1" w.p.regulator do exerciseCmd first ApproveTerms
+
+  newTermsCid <- proposeTerms w.p (terms with minSubscription = 100000.0, version = 2) (Some w.termsCid) "raise minimum"
   req <- requestSubscription w w.p.bob 50000.0
   submitMustFail w.p.ta do
     exerciseCmd req SettleSubscription with
@@ -371,5 +402,3 @@ amendedTermsSupersedeOldOnes = do
   expectFailure "minimum subscription" w.p.ta do
     exerciseCmd req SettleSubscription with
       termsCid = newTermsCid, registerCid = w.registerCid, navCid = w.navCid, credentialCid = w.bobCred
-  expectFailure "bump the version" w.p.ta do
-    exerciseCmd newTermsCid Amend with newTerms = terms with version = 2

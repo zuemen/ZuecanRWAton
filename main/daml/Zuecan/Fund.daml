@@ -6,8 +6,11 @@
 --   that ties units to reserves is in Zuecan.Registry.
 module Zuecan.Fund
   ( FundTerms (..)
+  , TermsProposal (..)
   , NavReport (..)
-  , Amend (..)
+  , ApproveTerms (..)
+  , RejectTerms (..)
+  , WithdrawTerms (..)
   , Republish (..)
   , checkTermsFor
   , checkNav
@@ -18,8 +21,15 @@ import Zuecan.Compliance (Eligibility (..))
 import Zuecan.Portfolio (PortfolioRules)
 import Zuecan.Types
 
--- | The fund's offering terms, signed by the transfer agent. `offeringDocHash`
---   commits to the off-ledger prospectus or private placement memorandum.
+-- | The fund's offering terms. `offeringDocHash` commits to the off-ledger
+--   prospectus or private placement memorandum.
+--
+--   Signed by the transfer agent and the regulator, so neither can change
+--   them alone: the terms decide whose KYC credentials count, which venue
+--   may settle trades, what the settlement asset is and which portfolio
+--   limits apply. The transfer agent proposes (TermsProposal) and the
+--   regulator approves; approving an amendment archives the version it
+--   replaces, so every flow handed the old contract id fails from then on.
 template FundTerms
   with
     instrument : InstrumentId
@@ -42,23 +52,48 @@ template FundTerms
     offeringDocHash : Text
     version : Int
   where
-    signatory instrument.registrar
-    observer custodian, navAgent, compliance, operator, regulator, publicParty
+    signatory instrument.registrar, regulator
+    observer custodian, navAgent, compliance, operator, publicParty
     ensure name /= "" && currency /= "" && offeringDocHash /= ""
       && minSubscription > 0.0 && minRedemptionUnits > 0.0
       && not (null eligibility.allowedClasses)
       && not (null eligibility.allowedJurisdictions)
 
-    -- | A new version of the terms. Archiving the old one makes every flow
-    --   that is handed the old contract id fail, so changes take effect at once.
-    choice Amend : ContractId FundTerms
-      with
-        newTerms : FundTerms
-      controller instrument.registrar
+-- | The transfer agent's proposal for a fund's first terms (`replaces` is
+--   None) or for an amendment of the live version.
+template TermsProposal
+  with
+    proposed : FundTerms
+    replaces : Optional (ContractId FundTerms)
+    rationale : Text
+  where
+    signatory proposed.instrument.registrar
+    observer proposed.regulator
+
+    choice ApproveTerms : ContractId FundTerms
+      controller proposed.regulator
       do
-        assertMsg "an amendment cannot change the instrument" (newTerms.instrument == instrument)
-        assertMsg "an amendment must bump the version by one" (newTerms.version == version + 1)
-        create newTerms
+        case replaces of
+          None -> assertMsg "first terms must be version 1" (proposed.version == 1)
+          Some currentCid -> do
+            current <- fetch currentCid
+            assertMsg "an amendment cannot change the instrument" (current.instrument == proposed.instrument)
+            -- No check that the regulator stays the same is needed: archiving
+            -- the current terms takes the current regulator's authority, and
+            -- only the proposal's regulator is a controller here.
+            assertMsg "an amendment must bump the version by one" (proposed.version == current.version + 1)
+            archive currentCid
+        create proposed
+
+    choice RejectTerms : ()
+      with
+        reason : Text
+      controller proposed.regulator
+      do pure ()
+
+    choice WithdrawTerms : ()
+      controller proposed.instrument.registrar
+      do pure ()
 
 -- | The NAV per unit struck by the fund administrator. Republishing archives
 --   the previous report, so only the latest one is ever live.
