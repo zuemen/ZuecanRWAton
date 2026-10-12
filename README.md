@@ -21,22 +21,24 @@ ZuecanRWAton 是一個寫在 **Canton 帳本（Daml 3.4）** 上的真實資產�
 | 持有人有沒有權利？ | 沒有 | 持有部位由**過戶代理、託管機構與持有人三方簽署**；任何轉出、凍結、扣押都只能走持有人簽署時就同意的 choice，並留下紀錄 | `Zuecan.Registry` |
 
 此外：
-- **合格投資人**：申購、受讓、成交都要出示 KYC 機構簽發、未過期、制裁篩檢未逾 90 天的憑證，而且投資人類別與法域要在基金條款允許清單內。撤銷憑證會立刻生效。
+- **合格投資人**：申購、受讓、成交（份數交到新的持有人）都要出示 KYC 機構簽發、未過期、制裁篩檢未逾 90 天的憑證，而且投資人類別與法域要在基金條款允許清單內。撤銷憑證會立刻生效。付款給投資人之前（成交價金、贖回款），以及轉出份數之前，都會重新檢查制裁篩檢。
 - **儲備不足時的處理**：託管聲明低於負債時，新申購與以舊 NAV 贖回**都會被拒**（避免先跑的人佔便宜）。要等基金行政重新計算 NAV 才能恢復。
 - **貨幣基金投資限制（Rule 2a-7）**：帳本由申報的持倉計算 WAM、WAL、最長到期、每日／每週流動資產與政府資產占比；任一項違規就停止新申購（贖回照常），違規內容公開。
-- **監理機關**：以 observer 身分看得到所有持有部位、託管聲明、成交雙方與執法紀錄，而且可以下令停牌；監理停牌只有監理機關能解除。基金條款由過戶代理與監理機關共同簽署，修訂必須經監理核准。
+- **監理機關**：以 observer 身分看得到所有持有部位、託管聲明、成交雙方與執法紀錄，而且可以下令停牌；監理停牌只有監理機關能解除。基金條款與交易場所的控制合約都由監理機關共同簽署：條款修訂要監理核准，交易場所只能收緊、不能放寬自己的限制。
+- **執法**：過戶代理可依法律命令凍結、扣押持有部位，也能把託管中的份數（轉讓、賣單、成交、贖回）召回成凍結的部位。
+- **一定有出口**：現金鎖定到期回到持有人；交易場所逾期未交割，買賣雙方都可中止；託管機構逾期未付贖回款，投資人可取回份數。
 - **公開資訊**：帳冊總量、NAV、儲備聲明歷史、成交的價格與數量對 `Public` 角色公開，**不含**交易雙方身分。
 
 ## 角色
 
 | 角色 | 在帳本上做什麼 | 正式環境的對應 |
 |---|---|---|
-| `TransferAgent`（過戶代理／登記機構） | 簽署基金條款、持有部位；處理申購贖回；凍結、扣押 | 基金的 transfer agent |
+| `TransferAgent`（過戶代理／登記機構） | 提案基金條款；簽署持有部位；處理申購贖回；凍結、扣押、召回 | 基金的 transfer agent |
 | `Custodian`（託管機構） | 與過戶代理共同簽署帳冊與每一份持有部位；逐筆申報持倉；支付贖回款 | 保管銀行 |
 | `FundAdministrator`（基金行政） | 每日計算並公布 NAV | fund administrator |
 | `KycAgent`（KYC 機構） | 簽發、重新篩檢、撤銷投資人憑證 | 持牌的 KYC／AML 服務商 |
-| `VenueOperator`（交易場所） | 款券同步交割；停牌；價格帶與單筆上限 | 受監理的代幣化證券交易場所 |
-| `Regulator`（監理機關） | 全部看得到；下令停牌與解除 | SEC／金管會 |
+| `VenueOperator`（交易場所） | 款券同步交割；停牌；收緊價格帶與單筆上限（放寬需監理） | 受監理的代幣化證券交易場所 |
+| `Regulator`（監理機關） | 全部看得到；核准條款與交易場所；下令停牌與解除 | SEC／金管會 |
 | `UsdIssuer`（穩定幣發行人） | 發行結算用美元代幣 | GENIUS 法案下的支付型穩定幣（例如 Canton 上的 USDC） |
 | `Public` | 唯讀公開資訊 | 任何人都可以 `readAs` 的公開 party |
 
@@ -60,10 +62,10 @@ sequenceDiagram
   TA->>TA: SettleSubscription → RecordIssuance：查 KYC、NAV、投資組合、儲備覆蓋 → 發行 FundHolding，現金付給託管機構
   I->>I: FundHolding.ListForSale（詢價回覆給指定買方）
   Note over I,V: 買方鎖定價金給交易場所 → Take → MatchedTrade
-  V->>V: Settle：停牌？價格帶？單筆上限？買方合格？賣方未被制裁？→ 同一筆交易交割
+  V->>V: Settle：控制合約監理共簽？停牌？價格帶？單筆上限？買方合格？賣方未被制裁？→ 同一筆交易交割
   I->>TA: RequestRedemption
   TA->>C: ApproveRedemption（以處理當下的 NAV 定價）
-  C->>I: Pay：付款並在帳冊註銷份數
+  C->>I: Pay：NAV 未被取代？投資人仍通過篩檢？用託管自己的現金？→ 付款並在帳冊註銷份數
 ```
 
 ## 執行
@@ -78,13 +80,14 @@ scripts/app-test.sh       # JSON Ledger API 應用：在 Canton sandbox 上跑�
 ```
 
 - `main/`：上帳本的合約（package `zuecan-rwa`）。**不依賴 daml-script**，可以上傳到 Canton participant，之後用 Smart Contract Upgrade 升級。
-- `test/`：Daml Script 情境測試（package `zuecan-rwa-test`），目前 29 個情境。
-  - CI 會擋下有任何 choice（內建 Archive 除外）沒被測試執行到的變更。
+- `test/`：Daml Script 情境測試（package `zuecan-rwa-test`），目前 37 個情境。
+  - CI 會擋下有任何 choice（內建 Archive 除外）沒被執行、或任何 template 沒被建立過的變更。
+  - `Test.Adversarial`：一次獨立對抗式審查找到的 7 項攻擊（F1–F7），每一項一個回歸情境（見 [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md) 10.5）。
   - `Test.Canton:allScenarios` 依序跑完全部情境，供 Canton 實跑使用。
   - `Test.Setup:demo` 是 `daml start` 的示範資料。
 - **Canton 實跑**：同一批情境不只在模擬帳本（IDE ledger）上跑，也透過 Ledger API 在真正的 Canton sandbox participant（靜態時間）上跑，CI 每次都執行。
-- 每個失敗情境都用 `expectFailure` 比對錯誤訊息，確認是被**預期的那條規則**擋下。大部分情境結尾都跑 `checkReconciles`，確認監理機關看得到的所有份數（含託管中的）等於帳冊流通量。
-- 突變測試：逐一拿掉 62 條關鍵檢查或授權，每一條都至少讓一個測試失敗（結果見 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#測試與突變測試)）。
+- 每個失敗情境都用 `expectFailure` 比對錯誤訊息，確認是被**預期的那條規則**擋下。移動份數的 31 個情境結尾都跑 `checkReconciles`，確認監理機關看得到的所有份數（含託管中的）等於帳冊流通量。
+- 突變測試：逐一拿掉 75 條關鍵檢查、計算或授權，每一條都至少讓一個測試失敗（結果見 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#測試與突變測試)）。
 
 ## 應用程式：透過 JSON Ledger API 操作帳本
 
@@ -108,8 +111,8 @@ main/daml/Zuecan/
   Cash.daml           結算現金與託管鎖定（只能付給約定收款人、逾期由持有人取回）
   Fund.daml           基金條款、NAV
   Portfolio.daml      持倉與 Rule 2a-7 指標（WAM、WAL、最長到期、流動資產、政府資產占比）
-  Registry.daml       帳冊（雙簽、儲備覆蓋、發行與註銷）、持有部位與所有移動方式：轉讓、詢價成交、贖回、凍結、扣押
-  Market.daml         交易場所控制（停牌、價格帶、單筆上限）、成交公告與監理申報
+  Registry.daml       帳冊（雙簽、儲備覆蓋、發行與註銷）、持有部位與所有移動方式：轉讓、詢價成交、贖回、凍結、扣押、召回
+  Market.daml         交易場所控制（監理共簽；停牌、價格帶、單筆上限）、成交公告與監理申報
   Subscription.daml   申購
 test/daml/Test/
   Setup.daml          測試世界與共用工具
@@ -117,6 +120,7 @@ test/daml/Test/
   Secondary.daml      次級市場與執法情境
   Portfolio.daml      持倉申報與投資組合限制
   Controls.daml       單方不得改帳、帳冊外不得出現份數、雜項
+  Adversarial.daml    獨立審查找到的攻擊（F1–F7）的回歸測試
   Canton.daml         依序執行全部情境（Canton 實跑用）
 app/                  JSON Ledger API 應用（後端操作、端到端流程、監理檢視頁）
 docs/
@@ -133,6 +137,7 @@ docs/
 - ~~儲備聲明細項與 Rule 2a-7 限制~~：`Zuecan.Portfolio`。
 - ~~基金條款監理共簽~~：`TermsProposal`。
 - ~~透過 JSON Ledger API 的後端與監理檢視頁~~：`app/`。
+- ~~獨立對抗式審查~~：7 項攻擊全部修正，各有回歸情境與突變測試。
 
 接下來：
 1. **Canton Network LocalNet**：用 Splice LocalNet（含 synchronizer 與多個 participant）跑同樣的流程，讓每個角色各自在不同節點。

@@ -13,13 +13,13 @@
 
 | 豁免要求（二手摘要） | 本平台 | 位置 |
 |---|---|---|
-| 許可制存取、OFAC 合規 | ✅ 取得份數必須出示有效憑證；制裁篩檢超過 90 天就失效；憑證撤銷立刻生效；被制裁的賣方拿不到價金 | `Compliance.checkEligible`、`checkScreened` |
-| 交易對限於代幣化股票、GENIUS 法案支付型穩定幣或代幣化貨幣市場基金 | ✅ 結算資產限定為基金條款指定的 `cashIssuer`。⚠️ 測試裡的發行人是替身 | `FundTerms.cashIssuer`、`MatchedTrade.Settle` |
+| 許可制存取、OFAC 合規 | ✅ 取得份數必須出示有效憑證；制裁篩檢超過 90 天就失效；憑證撤銷立刻生效；被制裁的賣方拿不到價金、被制裁的贖回人在付款時被擋下、被制裁的持有人不能把份數轉走 | `Compliance.checkEligible`、`checkScreened` |
+| 交易對限於代幣化股票、GENIUS 法案支付型穩定幣或代幣化貨幣市場基金 | ✅ 結算資產限定為基金條款指定的 `cashIssuer`。⚠️ 測試裡的發行人是替身 | `FundTerms.cashIssuer`；`RecordIssuance`、`SellOrder.Take`、`MatchedTrade.Settle`、`RedemptionPayout.Pay` 都檢查 |
 | 代幣與底層權利相同 | ✅ 本平台的份數**就是**基金份額本身的登記（過戶代理的帳冊），不是另一個憑證 | `FundRegister`、`FundHolding` |
 | 第三方代幣化要通知發行人，並給 30 天異議期 | 不適用：本平台由基金自己的過戶代理登記 | — |
 | 揭露 | ✅ 條款以雜湊承諾公開說明書；NAV、儲備聲明公開 | `FundTerms.offeringDocHash`、`ReserveAttestation` |
 | 公開交易資料 | ✅ 每筆成交產生公開的價量，不含身分 | `TradePrint` |
-| 協同暫停交易 | ✅ 監理機關可下令停牌，只有它能解除；場所也可自行停牌 | `MarketControl` |
+| 協同暫停交易 | ✅ 監理機關可下令停牌，只有它能解除；場所也可自行停牌。控制合約由監理共簽，場所不能換掉它，也只能收緊限制 | `MarketControl`、`MarketProposal` |
 | 交易量或標的數量上限 | ⚠️ 只有單筆上限，沒有每日總量上限（見 LIMITATIONS） | `MarketControl.maxTradeUnits` |
 | 禁止槓桿 | ✅ 沒有任何保證金或借貸功能。（豁免是否明文禁止：**未查證**） | — |
 | 不給《投資公司法》豁免 | 貨幣基金本身就是註冊投資公司，必須另外符合 Rule 2a-7（下一節） | — |
@@ -33,7 +33,7 @@
 | 每日流動資產 ≥ 25%、每週流動資產 ≥ 50%（2023 年修正） | ✅ 現金與美國公債計入；其他依到期日（營業日以日曆日近似） | 同上 |
 | 違規時的處理 | ✅ 違規內容公開記錄，停止新申購，贖回照常 | `RecordIssuance` |
 | 每日計算 NAV | ✅ NAV 超過 30 小時就不能發行或贖回 | `checkNav` |
-| 遠期定價（Rule 22c-1） | ✅ 以處理當下的 NAV 定價 | `SettleSubscription`、`ApproveRedemption` |
+| 遠期定價（Rule 22c-1） | ✅ 以處理當下的 NAV 定價；NAV 重新發布後，舊價格的待付款不能再付 | `SettleSubscription`、`ApproveRedemption`、`RedemptionPayout.Pay` |
 | 2023 年修正：取消贖回閘門；強制流動性費用只適用機構型優先與免稅基金 | 政府基金不收；本平台沒有贖回費 | — |
 | 價值偏離時的處理 | ✅ 儲備低於負債時，停止發行與以 NAV 贖回，等重新定價 | `RecordIssuance`、`RecordRedemption` |
 
@@ -56,7 +56,7 @@
 | 贖回 | 只能以參考價換回測試幣 | ✅ 以 NAV 贖回，由託管機構付款並註銷份數 |
 | 准入 | 部分（送件與核准未分離） | ✅ 申請與核發分離；有到期與重新篩檢；可撤銷 |
 | 轉讓限制 | 合成代幣可自由轉讓 | ✅ 每一條取得份數的路徑都檢查資格 |
-| 執法 | 無 | ✅ 凍結、解凍、扣押，皆留紀錄 |
+| 執法 | 無 | ✅ 凍結、解凍、扣押，以及召回託管中的份數，皆留紀錄 |
 | 隱私 | 公鏈全公開 | ✅ 只有 stakeholder 的節點拿得到資料 |
 
 ## 來源
