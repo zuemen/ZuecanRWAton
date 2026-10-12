@@ -82,7 +82,7 @@ scripts/mutation_test.py  # 突變測試（約 20 分鐘，3 路平行）
   - `Test.Setup:demo` 是 `daml start` 的示範資料。
 - **Canton 實跑**：同一批情境不只在模擬帳本（IDE ledger）上跑，也透過 Ledger API 在真正的 Canton sandbox participant（靜態時間）上跑，CI 每次都執行。
 - 每個失敗情境都用 `expectFailure` 比對錯誤訊息，確認是被**預期的那條規則**擋下。大部分情境結尾都跑 `checkReconciles`，確認監理機關看得到的所有份數（含託管中的）等於帳冊流通量。
-- 突變測試：逐一拿掉每一條關鍵檢查或授權，確認每一條都至少讓一個測試失敗（結果見 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#測試與突變測試)）。
+- 突變測試：逐一拿掉 58 條關鍵檢查或授權，58 條都至少讓一個測試失敗（結果見 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#測試與突變測試)）。
 
 ## 目錄
 
