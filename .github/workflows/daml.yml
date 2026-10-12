@@ -40,6 +40,10 @@ jobs:
       - name: Mutation list is current
         run: python3 scripts/mutation_test.py --check
 
+      # Appendix C of docs/SPECIFICATION.md is generated from main/.
+      - name: Specification catalogue is current
+        run: python3 scripts/spec_extract.py --check
+
   canton:
     name: scenarios on a Canton participant
     runs-on: ubuntu-latest

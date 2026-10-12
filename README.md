@@ -4,6 +4,7 @@ ZuecanRWAton 是一個寫在 **Canton 帳本（Daml 3.4）** 上的真實資產�
 標的是**代幣化政府貨幣市場基金**（持有美國短期公債與公債附買回）。平台涵蓋發行端（申購、贖回、儲備證明、過戶代理）與**許可制次級市場**（詢價＋款券同步交割）。
 
 > **不是法律意見，也不是投資建議。** 這是研究與教學用的原型：託管機構、基金行政、KYC 機構、穩定幣發行人在測試裡都由帳本上的角色模擬，沒有任何真實資產或真實資金。
+> 正式的模型規格見 [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md)。
 > 監理定位一律需要法遵確認，詳見 [`docs/COMPLIANCE_MAPPING.md`](docs/COMPLIANCE_MAPPING.md) 與 [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md)。
 
 ---
@@ -119,6 +120,7 @@ test/daml/Test/
   Canton.daml         依序執行全部情境（Canton 實跑用）
 app/                  JSON Ledger API 應用（後端操作、端到端流程、監理檢視頁）
 docs/
+  SPECIFICATION.md    帳本模型規格書：定義、授權語意、操作前後置條件、計算公式、不變式、驗證證據（附錄 C 由原始碼產生）
   ARCHITECTURE.md     設計、授權與隱私矩陣、不變式、取捨
   COMPLIANCE_MAPPING.md  SEC 創新豁免、Rule 2a-7、台灣規範對照
   LIMITATIONS.md      已知限制與未查證事項
