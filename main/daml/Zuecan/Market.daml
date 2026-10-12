@@ -1,0 +1,108 @@
+-- | Controls of the permissioned secondary market. Trading is bilateral
+--   (request-for-quote, then delivery-versus-payment) rather than through a
+--   shared liquidity pool: on Canton every swap against a single pool
+--   contract would archive and recreate it, so all traders would contend for
+--   the same contract.
+module Zuecan.Market
+  ( MarketStatus (..)
+  , MarketControl (..)
+  , TradePrint (..)
+  , RegulatoryTradeReport (..)
+  , OperatorHalt (..)
+  , OperatorResume (..)
+  , RegulatorHalt (..)
+  , RegulatorResume (..)
+  , SetLimits (..)
+  ) where
+
+import Zuecan.Types
+
+data MarketStatus
+  = Trading
+  | HaltedByOperator with reason : Text
+  | HaltedByRegulator with reason : Text
+  deriving (Eq, Show)
+
+-- | Venue-level switches for one instrument. A halt the regulator imposes can
+--   only be lifted by the regulator.
+template MarketControl
+  with
+    operator : Party
+    regulator : Party
+    instrument : InstrumentId
+    readers : [Party]
+    status : MarketStatus
+    maxTradeUnits : Decimal   -- ^ per-trade size cap
+    maxDeviationBps : Decimal -- ^ price band around NAV
+  where
+    signatory operator
+    observer regulator, instrument.registrar, readers
+    ensure maxTradeUnits > 0.0 && maxDeviationBps >= 0.0
+
+    choice OperatorHalt : ContractId MarketControl
+      with
+        reason : Text
+      controller operator
+      do
+        case status of
+          HaltedByRegulator _ -> abort "the regulator has halted this market"
+          _ -> create this with status = HaltedByOperator reason
+
+    choice OperatorResume : ContractId MarketControl
+      controller operator
+      do
+        case status of
+          HaltedByOperator _ -> create this with status = Trading
+          HaltedByRegulator _ -> abort "only the regulator can lift a regulatory halt"
+          Trading -> abort "the market is already trading"
+
+    choice RegulatorHalt : ContractId MarketControl
+      with
+        reason : Text
+      controller regulator
+      do create this with status = HaltedByRegulator reason
+
+    choice RegulatorResume : ContractId MarketControl
+      controller regulator
+      do
+        case status of
+          HaltedByRegulator _ -> create this with status = Trading
+          _ -> abort "there is no regulatory halt to lift"
+
+    choice SetLimits : ContractId MarketControl
+      with
+        newMaxTradeUnits : Decimal
+        newMaxDeviationBps : Decimal
+      controller operator
+      do create this with maxTradeUnits = newMaxTradeUnits, maxDeviationBps = newMaxDeviationBps
+
+-- | Public post-trade transparency: price and size, no identities.
+template TradePrint
+  with
+    operator : Party
+    instrument : InstrumentId
+    readers : [Party]
+    units : Decimal
+    price : Decimal
+    currency : Text
+    navAtExecution : Decimal
+    executedAt : Time
+  where
+    signatory operator
+    observer readers
+
+-- | The same trade with both counterparties, for the regulator only.
+template RegulatoryTradeReport
+  with
+    operator : Party
+    regulator : Party
+    instrument : InstrumentId
+    seller : Party
+    buyer : Party
+    units : Decimal
+    price : Decimal
+    currency : Text
+    executedAt : Time
+  where
+    signatory operator
+    observer regulator

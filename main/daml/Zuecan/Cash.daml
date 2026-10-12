@@ -1,0 +1,118 @@
+-- | Tokenized USD used to settle subscriptions, redemptions and trades.
+--
+--   On a test ledger the issuer is a stand-in. In production this would be a
+--   payment stablecoin issued under the GENIUS Act (for example USDC on
+--   Canton), which is also one of the pair assets the SEC Innovation Exemption
+--   allows a tokenized security to trade against.
+module Zuecan.Cash
+  ( CashHolding (..)
+  , LockedCash (..)
+  , Transfer (..)
+  , Merge (..)
+  , Lock (..)
+  , PayOut (..)
+  , Release (..)
+  , Reclaim (..)
+  ) where
+
+
+-- | A cash balance. Like a fiat-backed stablecoin, the issuer is the only
+--   signatory: it can freeze or burn, and holders need not consent to receive.
+template CashHolding
+  with
+    issuer : Party
+    owner : Party
+    currency : Text
+    amount : Decimal
+  where
+    signatory issuer
+    observer owner
+    ensure amount > 0.0 && currency /= ""
+
+    choice Transfer : (ContractId CashHolding, Optional (ContractId CashHolding))
+      with
+        newOwner : Party
+        transferAmount : Decimal
+      controller owner
+      do
+        assertMsg "transfer amount must be positive and covered by the holding"
+          (transferAmount > 0.0 && transferAmount <= amount)
+        sent <- create this with owner = newOwner, amount = transferAmount
+        change <- if transferAmount == amount
+          then pure None
+          else Some <$> create this with amount = amount - transferAmount
+        pure (sent, change)
+
+    choice Merge : ContractId CashHolding
+      with
+        otherCid : ContractId CashHolding
+      controller owner
+      do
+        other <- fetch otherCid
+        assertMsg "can only merge cash of the same issuer, owner and currency"
+          (other.issuer == issuer && other.owner == owner && other.currency == currency)
+        archive otherCid
+        create this with amount = amount + other.amount
+
+    -- | Escrow part of the balance for one purpose. Only `lockedTo` can move
+    --   it, only to `payee`, and only before `releaseAfter`; after that only
+    --   the owner can take it back.
+    choice Lock : (ContractId LockedCash, Optional (ContractId CashHolding))
+      with
+        lockedTo : Party
+        payee : Party
+        lockAmount : Decimal
+        releaseAfter : Time
+        purpose : Text
+      controller owner
+      do
+        assertMsg "lock amount must be positive and covered by the holding"
+          (lockAmount > 0.0 && lockAmount <= amount)
+        locked <- create LockedCash with
+          issuer, owner, currency, amount = lockAmount
+          lockedTo, payee, releaseAfter, purpose
+        change <- if lockAmount == amount
+          then pure None
+          else Some <$> create this with amount = amount - lockAmount
+        pure (locked, change)
+
+-- | Cash in escrow. The owner keeps a way out (Reclaim after `releaseAfter`)
+--   and `lockedTo` can only pay the one payee agreed when the lock was made.
+--
+--   Paying out needs the owner's authority as well as `lockedTo`'s, so it can
+--   only happen inside a contract the owner signed for that purpose (their
+--   SubscriptionRequest, or the MatchedTrade they entered as buyer). Without
+--   that, a transfer agent could pay a cancelled subscription's cash to the
+--   custodian and issue nothing for it.
+template LockedCash
+  with
+    issuer : Party
+    owner : Party
+    currency : Text
+    amount : Decimal
+    lockedTo : Party
+    payee : Party
+    releaseAfter : Time
+    purpose : Text
+  where
+    signatory issuer
+    observer owner, lockedTo, payee
+    ensure amount > 0.0
+
+    choice PayOut : ContractId CashHolding
+      controller lockedTo, owner
+      do
+        now <- getTime
+        assertMsg "the lock has lapsed; only the owner can reclaim it now" (now < releaseAfter)
+        create CashHolding with issuer, owner = payee, currency, amount
+
+    choice Release : ContractId CashHolding
+      controller lockedTo
+      do create CashHolding with issuer, owner, currency, amount
+
+    choice Reclaim : ContractId CashHolding
+      controller owner
+      do
+        now <- getTime
+        assertMsg "cash is still locked" (now >= releaseAfter)
+        create CashHolding with issuer, owner, currency, amount

@@ -1,0 +1,13 @@
+# Daml Script scenarios. A separate package so test code never ships in the
+# DAR that goes on the ledger.
+sdk-version: 3.4.0-rc2
+name: zuecan-rwa-test
+source: daml
+version: 0.1.0
+init-script: Test.Setup:demo
+dependencies:
+  - daml-prim
+  - daml-stdlib
+  - daml-script
+data-dependencies:
+  - ../main/.daml/dist/zuecan-rwa-0.1.0.dar

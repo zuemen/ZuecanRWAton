@@ -1,0 +1,145 @@
+-- | Investor onboarding: KYC/AML and sanctions screening done off-ledger by a
+--   licensed compliance agent, whose result is recorded on-ledger as a
+--   revocable, expiring credential. No personal data goes on the ledger, only
+--   a hash of the evidence the agent keeps.
+module Zuecan.Compliance
+  ( Eligibility (..)
+  , CredentialRequest (..)
+  , InvestorCredential (..)
+  , CredentialRevocation (..)
+  , Approve (..)
+  , Reject (..)
+  , Withdraw (..)
+  , Rescreen (..)
+  , Revoke (..)
+  , checkEligible
+  , checkScreened
+  ) where
+
+import DA.Time
+import Zuecan.Types
+
+-- | Who may hold an instrument. Part of the fund's terms.
+data Eligibility = Eligibility
+  with
+    allowedClasses : [InvestorClass]
+    allowedJurisdictions : [Text]  -- ^ ISO 3166-1 alpha-2
+    maxScreeningAge : RelTime      -- ^ sanctions screening must be at least this recent
+  deriving (Eq, Show)
+
+-- | An investor asks the compliance agent to onboard them.
+template CredentialRequest
+  with
+    investor : Party
+    compliance : Party
+    requestedClass : InvestorClass
+    jurisdiction : Text
+    evidenceHash : Text  -- ^ hash of the documents handed over off-ledger
+  where
+    signatory investor
+    observer compliance
+    ensure jurisdiction /= "" && evidenceHash /= ""
+
+    choice Approve : ContractId InvestorCredential
+      with
+        grantedClass : InvestorClass  -- ^ may differ from what was requested
+        validFor : RelTime
+        relying : [Party]             -- ^ institutions allowed to rely on it
+        regulator : Party
+      controller compliance
+      do
+        now <- getTime
+        create InvestorCredential with
+          compliance
+          investor
+          investorClass = grantedClass
+          jurisdiction
+          screenedAt = now
+          expiresAt = addRelTime now validFor
+          evidenceHash
+          relying
+          regulator
+
+    choice Reject : ()
+      with
+        reason : Text
+      controller compliance
+      do pure ()
+
+    choice Withdraw : ()
+      controller investor
+      do pure ()
+
+-- | The compliance agent's attestation that `investor` passed KYC/AML and
+--   sanctions screening and belongs to `investorClass`. Archiving it (Revoke)
+--   immediately cuts the investor off from every flow that checks it.
+template InvestorCredential
+  with
+    compliance : Party
+    investor : Party
+    investorClass : InvestorClass
+    jurisdiction : Text
+    screenedAt : Time
+    expiresAt : Time
+    evidenceHash : Text
+    relying : [Party]
+    regulator : Party
+  where
+    signatory compliance
+    observer investor, relying, regulator
+    ensure expiresAt > screenedAt && jurisdiction /= "" && evidenceHash /= ""
+
+    -- | Periodic re-screening against sanctions lists.
+    choice Rescreen : ContractId InvestorCredential
+      with
+        newEvidenceHash : Text
+        validFor : RelTime
+      controller compliance
+      do
+        now <- getTime
+        create this with
+          screenedAt = now
+          expiresAt = addRelTime now validFor
+          evidenceHash = newEvidenceHash
+
+    choice Revoke : ContractId CredentialRevocation
+      with
+        reason : Text
+      controller compliance
+      do
+        now <- getTime
+        create CredentialRevocation with
+          compliance
+          investor
+          regulator
+          revokedAt = now
+          reason
+
+-- | Audit trail of a revocation, visible to the investor and the regulator.
+template CredentialRevocation
+  with
+    compliance : Party
+    investor : Party
+    regulator : Party
+    revokedAt : Time
+    reason : Text
+  where
+    signatory compliance
+    observer investor, regulator
+
+-- | The credential is the fund's compliance agent's, about `investor`, still
+--   valid, and recently screened. Enough to let an existing holder exit.
+checkScreened : Party -> Party -> Eligibility -> Time -> InvestorCredential -> Update ()
+checkScreened compliance investor eligibility now cred = do
+  assertMsg "credential belongs to a different investor" (cred.investor == investor)
+  assertMsg "credential was not issued by the fund's compliance agent" (cred.compliance == compliance)
+  assertMsg "credential has expired" (now < cred.expiresAt)
+  assertMsg "sanctions screening is out of date" (isWithin eligibility.maxScreeningAge now cred.screenedAt)
+
+-- | `checkScreened`, plus the investor's class and jurisdiction are ones the
+--   fund admits. Required to acquire units.
+checkEligible : Party -> Party -> Eligibility -> Time -> InvestorCredential -> Update ()
+checkEligible compliance investor eligibility now cred = do
+  checkScreened compliance investor eligibility now cred
+  assertMsg "investor class is not eligible for this fund" (cred.investorClass `elem` eligibility.allowedClasses)
+  assertMsg "investor jurisdiction is not eligible for this fund" (cred.jurisdiction `elem` eligibility.allowedJurisdictions)

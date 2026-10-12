@@ -1,0 +1,9 @@
+# The ledger model. Kept free of daml-script so the DAR can be uploaded to a
+# Canton participant and upgraded with Smart Contract Upgrade (SCU).
+sdk-version: 3.4.0-rc2
+name: zuecan-rwa
+source: daml
+version: 0.1.0
+dependencies:
+  - daml-prim
+  - daml-stdlib

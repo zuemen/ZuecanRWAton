@@ -1,0 +1,43 @@
+-- | Shared vocabulary for the ZuecanRWAton ledger model.
+module Zuecan.Types
+  ( InstrumentId (..)
+  , InvestorClass (..)
+  , floor6
+  , isWithin
+  , bpsDeviation
+  ) where
+
+import DA.Time
+
+-- | Identifies an instrument on the ledger. The registrar keeps the book of
+--   record: for fund units it is the fund's transfer agent, for cash it is
+--   the stablecoin issuer.
+data InstrumentId = InstrumentId
+  with
+    registrar : Party
+    symbol : Text
+  deriving (Eq, Show, Ord)
+
+-- | Investor categories the compliance agent can attest to. A fund's terms
+--   list which ones may hold its units.
+data InvestorClass
+  = Retail
+  | Accredited          -- ^ US Reg D accredited investor
+  | QualifiedPurchaser  -- ^ US Investment Company Act 2(a)(51)
+  | Professional        -- ^ Taiwan FSC professional investor
+  | Institutional
+  deriving (Eq, Show, Ord)
+
+-- | Round a non-negative amount down to 6 decimal places, the precision used
+--   for both fund units and USD cash (the same as USDC). Rounding down means
+--   the ledger never hands out more units or cash than was paid for.
+floor6 : Decimal -> Decimal
+floor6 x = intToDecimal (truncate (x * 1000000.0)) / 1000000.0
+
+-- | True when `t` is no older than `maxAge` at `now`.
+isWithin : RelTime -> Time -> Time -> Bool
+isWithin maxAge now t = t <= now && subTime now t <= maxAge
+
+-- | Absolute deviation of `price` from `reference`, in basis points.
+bpsDeviation : Decimal -> Decimal -> Decimal
+bpsDeviation reference price = abs (price - reference) / reference * 10000.0

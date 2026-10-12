@@ -1,0 +1,375 @@
+-- | Primary market: subscriptions, reserve coverage, redemptions.
+module Test.Primary where
+
+import DA.Time
+import Daml.Script
+
+import Test.Setup
+import Zuecan.Cash
+import Zuecan.Compliance
+import Zuecan.Fund
+import Zuecan.Holding
+import Zuecan.Subscription
+import Zuecan.Types
+
+-- | Cash goes to the custodian, units are issued at NAV (rounded down), and
+--   the register counts them.
+subscriptionIssuesUnitsAtNav : Script ()
+subscriptionIssuesUnitsAtNav = do
+  w <- setup
+  (holding, w) <- subscribe w w.p.alice w.aliceCred 100000.0
+  Some h <- queryContractId w.p.alice holding
+  let expected = floor6 (100000.0 / launchNav)
+  assertMsg "units = cash / NAV, rounded down" (h.units == expected)
+  assertMsg "the holding is signed by the transfer agent and the investor" (h.owner == w.p.alice && h.instrument.registrar == w.p.ta)
+  aliceCash <- cashOf w.p.alice
+  assertMsg "alice paid exactly the subscription" (aliceCash == 900000.0)
+  custodianCash <- cashOf w.p.custodian
+  assertMsg "the custodian received the cash" (custodianCash == 100000.0)
+  reg <- register w
+  assertMsg "outstanding counts the new units" (reg.outstanding == expected)
+  assertMsg "the units are covered" (liability reg launchNav <= coverage reg)
+  checkReconciles w
+
+-- | The custodian's attestation resets on-ledger flows: what it states is
+--   what backs the units from then on.
+custodianAttestationBacksIssuance : Script ()
+custodianAttestationBacksIssuance = do
+  w <- setup
+  (_, w) <- subscribe w w.p.alice w.aliceCred 100000.0
+  -- The custodian bought T-bills and reports the fund's assets.
+  w <- attest w 100000.0 "custodian-statement-2026-10-12"
+  reg <- register w
+  assertMsg "flows reset after attestation" (reg.netFlowSinceAttestation == 0.0 && reg.attestedReserve == 100000.0)
+  -- Public proof of reserves.
+  records <- query @ReserveAttestation w.p.public
+  assertMsg "the attestation is public" (length records == 1)
+  (_, w) <- subscribe w w.p.bob w.bobCred 50000.0
+  reg <- register w
+  assertMsg "new cash counts until the next statement" (reg.netFlowSinceAttestation == 50000.0)
+  checkReconciles w
+
+-- | If the custodian reports less than the units are worth, no more units can
+--   be issued and nobody can redeem at the stale NAV until it is repriced.
+underReservedFundStopsIssuingAndRedeeming : Script ()
+underReservedFundStopsIssuingAndRedeeming = do
+  w <- setup
+  (aliceHolding, w) <- subscribe w w.p.alice w.aliceCred 100000.0
+  -- A loss: the custodian can only attest to 90,000.
+  w <- attest w 90000.0 "custodian-statement-impairment"
+
+  req <- requestSubscription w w.p.bob 50000.0
+  expectFailure "not fully backed by attested reserves" w.p.ta do
+    exerciseCmd req SettleSubscription with
+      termsCid = w.termsCid, registerCid = w.registerCid, navCid = w.navCid, credentialCid = w.bobCred
+
+  -- Alice tries to leave first at the old NAV.
+  (redeemReq, _) <- submit w.p.alice do
+    exerciseCmd aliceHolding RequestRedemption with custodian = w.p.custodian, amount = 10000.0
+  payout <- submit w.p.ta do
+    exerciseCmd redeemReq ApproveRedemption with termsCid = w.termsCid, navCid = w.navCid, credentialCid = w.aliceCred
+  custodianCash <- largestCash w.p.custodian
+  expectFailure "reserves are below liabilities" w.p.custodian do
+    exerciseCmd payout Pay with cashCid = custodianCash, registerCid = w.registerCid, termsCid = w.termsCid, navCid = w.navCid
+
+  -- The administrator reprices the units to what the assets are worth.
+  w <- republishNav w 0.9300
+  reg <- register w
+  assertMsg "after repricing the units are covered again" (liability reg 0.9300 <= coverage reg)
+  -- The approved payout was struck at the old NAV, so it is cancelled and
+  -- re-approved at the new one.
+  (redeemReq, _) <- do
+    restored <- submit w.p.ta do exerciseCmd payout CancelPayout with reason = "NAV corrected"
+    submit w.p.alice do exerciseCmd restored RequestRedemption with custodian = w.p.custodian, amount = 10000.0
+  payout <- submit w.p.ta do
+    exerciseCmd redeemReq ApproveRedemption with termsCid = w.termsCid, navCid = w.navCid, credentialCid = w.aliceCred
+  (_, registerCid) <- submit w.p.custodian do
+    exerciseCmd payout Pay with cashCid = custodianCash, registerCid = w.registerCid, termsCid = w.termsCid, navCid = w.navCid
+  let w' = w with registerCid
+  aliceCash <- cashOf w.p.alice
+  assertMsg "alice was paid at the corrected NAV" (aliceCash == 900000.0 + floor6 (10000.0 * 0.9300))
+  checkReconciles w'
+
+-- | Daily statements and a daily NAV are preconditions for issuing.
+staleAttestationOrNavBlocksIssuance : Script ()
+staleAttestationOrNavBlocksIssuance = do
+  w <- setup
+  (_, w) <- subscribe w w.p.alice w.aliceCred 100000.0
+  passTime (hours 31)
+  w <- republishNav w launchNav
+  req <- requestSubscription w w.p.bob 50000.0
+  let settle cid = exerciseCmd cid SettleSubscription with
+        termsCid = w.termsCid, registerCid = w.registerCid, navCid = w.navCid, credentialCid = w.bobCred
+  expectFailure "reserve attestation is out of date" w.p.ta (settle req)
+  w <- attest w 100000.0 "custodian-statement-day-2"
+  -- And a NAV more than 30 hours old is refused as well.
+  passTime (hours 31)
+  w <- attest w 100000.0 "custodian-statement-day-3"
+  req <- requestSubscription w w.p.bob 50000.0
+  expectFailure "NAV is out of date" w.p.ta do
+    exerciseCmd req SettleSubscription with
+      termsCid = w.termsCid, registerCid = w.registerCid, navCid = w.navCid, credentialCid = w.bobCred
+  w <- republishNav w launchNav
+  (_, w) <- subscribe w w.p.bob w.bobCred 50000.0
+  checkReconciles w
+
+-- | Redemptions also need a current custodian statement, and a NAV from the
+--   fund's own administrator.
+staleAttestationOrForeignNavBlocksRedemption : Script ()
+staleAttestationOrForeignNavBlocksRedemption = do
+  w <- setup
+  (holding, w) <- subscribe w w.p.alice w.aliceCred 100000.0
+  (req, _) <- submit w.p.alice do
+    exerciseCmd holding RequestRedemption with custodian = w.p.custodian, amount = 1000.0
+  -- A NAV struck by someone other than the fund's administrator.
+  rogue <- allocatePartyByHint (PartyIdHint "RogueAdministrator")
+  now <- getTime
+  rogueNav <- submit rogue do
+    createCmd NavReport with
+      instrument = w.instrument, navAgent = rogue, readers = []
+      navPerUnit = 2.0, asOf = now, seq = 1, methodologyRef = "made up"
+  expectFailure "not struck by the fund's NAV agent" w.p.ta do
+    exerciseCmd req ApproveRedemption with termsCid = w.termsCid, navCid = rogueNav, credentialCid = w.aliceCred
+  payout <- submit w.p.ta do
+    exerciseCmd req ApproveRedemption with termsCid = w.termsCid, navCid = w.navCid, credentialCid = w.aliceCred
+  passTime (hours 31)
+  w <- republishNav w launchNav
+  custodianCash <- largestCash w.p.custodian
+  expectFailure "reserve attestation is out of date" w.p.custodian do
+    exerciseCmd payout Pay with cashCid = custodianCash, registerCid = w.registerCid, termsCid = w.termsCid, navCid = w.navCid
+  w <- attest w 100000.0 "custodian-statement-day-2"
+  (_, registerCid) <- submit w.p.custodian do
+    exerciseCmd payout Pay with cashCid = custodianCash, registerCid = w.registerCid, termsCid = w.termsCid, navCid = w.navCid
+  checkReconciles w with registerCid
+
+-- | An investor whose screening has lapsed cannot redeem until re-screened.
+redeemerMustBeScreened : Script ()
+redeemerMustBeScreened = do
+  w <- setup
+  (holding, w) <- subscribe w w.p.alice w.aliceCred 100000.0
+  passTime (days 91)
+  w <- attest w 100000.0 "custodian-statement-q2"
+  w <- republishNav w launchNav
+  (req, _) <- submit w.p.alice do
+    exerciseCmd holding RequestRedemption with custodian = w.p.custodian, amount = 1000.0
+  expectFailure "sanctions screening is out of date" w.p.ta do
+    exerciseCmd req ApproveRedemption with termsCid = w.termsCid, navCid = w.navCid, credentialCid = w.aliceCred
+  aliceCred <- submit w.p.compliance do
+    exerciseCmd w.aliceCred Rescreen with newEvidenceHash = "sha256:rescreen-q2", validFor = days 365
+  _ <- submit w.p.ta do
+    exerciseCmd req ApproveRedemption with termsCid = w.termsCid, navCid = w.navCid, credentialCid = aliceCred
+  checkReconciles w
+
+-- | KYC is enforced on the ledger, not in a front end.
+ineligibleInvestorsCannotSubscribe : Script ()
+ineligibleInvestorsCannotSubscribe = do
+  w <- setup
+  let settleWith req cred = exerciseCmd req SettleSubscription with
+        termsCid = w.termsCid, registerCid = w.registerCid, navCid = w.navCid, credentialCid = cred
+
+  -- Carol is onboarded, but as a retail investor.
+  req <- requestSubscription w w.p.carol 50000.0
+  expectFailure "investor class is not eligible" w.p.ta (settleWith req w.carolCred)
+  -- Dave has no credential and cannot borrow Alice's.
+  req <- requestSubscription w w.p.dave 50000.0
+  expectFailure "credential belongs to a different investor" w.p.ta (settleWith req w.aliceCred)
+  -- A credential from some other KYC provider is not one the fund relies on.
+  rogue <- allocatePartyByHint (PartyIdHint "RogueKyc")
+  roguReq <- submit w.p.dave do
+    createCmd CredentialRequest with
+      investor = w.p.dave, compliance = rogue, requestedClass = Institutional
+      jurisdiction = "US", evidenceHash = "sha256:nothing"
+  daveCred <- submit rogue do
+    exerciseCmd roguReq Approve with
+      grantedClass = Institutional, validFor = days 365, relying = [w.p.ta], regulator = w.p.regulator
+  expectFailure "not issued by the fund's compliance agent" w.p.ta (settleWith req daveCred)
+  -- A jurisdiction outside the fund's list.
+  ericCred <- do
+    eric <- allocatePartyByHint (PartyIdHint "Eric")
+    onboard w.p eric Accredited "KP"
+  Some cred <- queryContractId w.p.ta ericCred
+  submit w.p.usd do createCmd CashHolding with issuer = w.p.usd, owner = cred.investor, currency = "USD", amount = 100000.0
+  req <- requestSubscription w cred.investor 50000.0
+  expectFailure "jurisdiction is not eligible" w.p.ta (settleWith req ericCred)
+
+  -- Revocation takes effect immediately: the archived credential is gone.
+  _ <- submit w.p.compliance do exerciseCmd w.aliceCred Revoke with reason = "sanctions hit"
+  req <- requestSubscription w w.p.alice 50000.0
+  submitMustFail w.p.ta (settleWith req w.aliceCred)
+  revocations <- query @CredentialRevocation w.p.regulator
+  assertMsg "the regulator sees the revocation" (length revocations == 1)
+
+  -- Cash escrowed for someone other than the fund's custodian.
+  bobCash <- largestCash w.p.bob
+  now <- getTime
+  (misdirected, _) <- submit w.p.bob do
+    exerciseCmd bobCash Lock with
+      lockedTo = w.p.ta, payee = w.p.ta, lockAmount = 50000.0
+      releaseAfter = addRelTime now (days 2), purpose = "subscription"
+  misdirectedReq <- submit w.p.bob do
+    createCmd SubscriptionRequest with
+      instrument = w.instrument, investor = w.p.bob, cashAmount = 50000.0, lockedCashCid = misdirected
+  expectFailure "held for this fund's custodian" w.p.ta (settleWith misdirectedReq w.bobCred)
+
+  -- A request for more than was escrowed.
+  bobCash <- largestCash w.p.bob
+  (locked, _) <- submit w.p.bob do
+    exerciseCmd bobCash Lock with
+      lockedTo = w.p.ta, payee = w.p.custodian, lockAmount = 50000.0
+      releaseAfter = addRelTime now (days 2), purpose = "subscription"
+  inflated <- submit w.p.bob do
+    createCmd SubscriptionRequest with
+      instrument = w.instrument, investor = w.p.bob, cashAmount = 60000.0, lockedCashCid = locked
+  expectFailure "does not match the request" w.p.ta (settleWith inflated w.bobCred)
+
+  -- Below the minimum subscription.
+  req <- requestSubscription w w.p.bob 999.0
+  expectFailure "minimum subscription" w.p.ta (settleWith req w.bobCred)
+
+  reg <- register w
+  assertMsg "nothing was issued" (reg.outstanding == 0.0)
+
+-- | A credential past its expiry is refused even if screening is recent.
+expiredCredentialIsRefused : Script ()
+expiredCredentialIsRefused = do
+  w <- setup
+  req <- submit w.p.dave do
+    createCmd CredentialRequest with
+      investor = w.p.dave, compliance = w.p.compliance, requestedClass = Institutional
+      jurisdiction = "SG", evidenceHash = "sha256:kyc-file-dave"
+  daveCred <- submit w.p.compliance do
+    exerciseCmd req Approve with
+      grantedClass = Institutional, validFor = days 10, relying = [w.p.ta, w.p.operator], regulator = w.p.regulator
+  passTime (days 11)
+  w <- attest w 0.0 "custodian-statement-empty-fund"
+  w <- republishNav w launchNav
+  sub <- requestSubscription w w.p.dave 50000.0
+  expectFailure "credential has expired" w.p.ta do
+    exerciseCmd sub SettleSubscription with
+      termsCid = w.termsCid, registerCid = w.registerCid, navCid = w.navCid, credentialCid = daveCred
+
+-- | Screening goes stale after 90 days and must be redone before investing.
+staleScreeningMustBeRedone : Script ()
+staleScreeningMustBeRedone = do
+  w <- setup
+  passTime (days 91)
+  w <- attest w 0.0 "custodian-statement-empty-fund"
+  w <- republishNav w launchNav
+  req <- requestSubscription w w.p.bob 50000.0
+  expectFailure "sanctions screening is out of date" w.p.ta do
+    exerciseCmd req SettleSubscription with
+      termsCid = w.termsCid, registerCid = w.registerCid, navCid = w.navCid, credentialCid = w.bobCred
+  bobCred <- submit w.p.compliance do
+    exerciseCmd w.bobCred Rescreen with newEvidenceHash = "sha256:rescreen-q1", validFor = days 365
+  _ <- submit w.p.ta do
+    exerciseCmd req SettleSubscription with
+      termsCid = w.termsCid, registerCid = w.registerCid, navCid = w.navCid, credentialCid = bobCred
+  pure ()
+
+-- | The investor escrows cash; if the transfer agent rejects, it comes back
+--   at once, and if nobody acts the investor reclaims it after the lock.
+subscriptionCashIsNeverStuck : Script ()
+subscriptionCashIsNeverStuck = do
+  w <- setup
+  req <- requestSubscription w w.p.bob 50000.0
+  _ <- submit w.p.ta do exerciseCmd req RejectSubscription with reason = "outside dealing hours"
+  bobCash <- cashOf w.p.bob
+  assertMsg "rejected cash is returned" (bobCash == 1000000.0)
+
+  req <- requestSubscription w w.p.bob 50000.0
+  Some r <- queryContractId w.p.bob req
+  submit w.p.bob do exerciseCmd req CancelSubscription
+  expectFailure "cash is still locked" w.p.bob do exerciseCmd r.lockedCashCid Reclaim
+  -- Once the request is withdrawn the transfer agent cannot pay the cash to
+  -- the custodian on its own (that needs the investor's authority, which
+  -- only the request carried) ...
+  submitMustFail w.p.ta do exerciseCmd r.lockedCashCid PayOut
+  passTime (days 2)
+  -- ... and after the lock lapses not even both of them together can.
+  expectFailureAs "the lock has lapsed" (actAs [w.p.ta, w.p.bob]) do exerciseCmd r.lockedCashCid PayOut
+  -- ... and the investor takes it back.
+  _ <- submit w.p.bob do exerciseCmd r.lockedCashCid Reclaim
+  bobCash <- cashOf w.p.bob
+  assertMsg "cancelled cash is reclaimed" (bobCash == 1000000.0)
+
+-- | Redemption at the NAV current when processed; units are retired and the
+--   custodian pays from the fund's cash.
+redemptionPaysAtNavAndRetiresUnits : Script ()
+redemptionPaysAtNavAndRetiresUnits = do
+  w <- setup
+  (holding, w) <- subscribe w w.p.alice w.aliceCred 100000.0
+  w <- attest w 100000.0 "custodian-statement-day-1"
+  -- A day of income.
+  passTime (days 1)
+  w <- republishNav w 1.0426
+  w <- attest w 100010.00 "custodian-statement-day-2"
+
+  (redeemReq, Some rest) <- submit w.p.alice do
+    exerciseCmd holding RequestRedemption with custodian = w.p.custodian, amount = 20000.0
+  checkReconciles w
+  payout <- submit w.p.ta do
+    exerciseCmd redeemReq ApproveRedemption with termsCid = w.termsCid, navCid = w.navCid, credentialCid = w.aliceCred
+  checkReconciles w
+  custodianCash <- largestCash w.p.custodian
+  (_, registerCid) <- submit w.p.custodian do
+    exerciseCmd payout Pay with cashCid = custodianCash, registerCid = w.registerCid, termsCid = w.termsCid, navCid = w.navCid
+  let w' = w with registerCid
+  aliceCash <- cashOf w.p.alice
+  assertMsg "paid at the new NAV" (aliceCash == 900000.0 + floor6 (20000.0 * 1.0426))
+  reg <- register w'
+  assertMsg "the units are retired" (reg.outstanding == floor6 (100000.0 / launchNav) - 20000.0)
+  Some left <- queryContractId w.p.alice rest
+  assertMsg "the rest stays with alice" (left.units == reg.outstanding)
+  checkReconciles w'
+
+  -- The investor can withdraw a request; the transfer agent can reject one.
+  (req2, _) <- submit w.p.alice do exerciseCmd rest RequestRedemption with custodian = w.p.custodian, amount = 100.0
+  restored <- submit w.p.alice do exerciseCmd req2 CancelRedemption
+  (req3, _) <- submit w.p.alice do exerciseCmd restored RequestRedemption with custodian = w.p.custodian, amount = 0.5
+  expectFailure "below the fund's minimum redemption" w.p.ta do
+    exerciseCmd req3 ApproveRedemption with termsCid = w.termsCid, navCid = w.navCid, credentialCid = w.aliceCred
+  _ <- submit w.p.ta do exerciseCmd req3 RejectRedemption with reason = "below minimum"
+  checkReconciles w'
+
+-- | Suspending subscriptions still lets holders out; suspending the fund
+--   stops both.
+fundStatusGatesFlows : Script ()
+fundStatusGatesFlows = do
+  w <- setup
+  (holding, w) <- subscribe w w.p.alice w.aliceCred 100000.0
+  registerCid <- submit w.p.ta do exerciseCmd w.registerCid SetStatus with newStatus = SubscriptionsSuspended
+  let w' = w with registerCid
+  req <- requestSubscription w' w.p.bob 50000.0
+  expectFailure "not open for subscriptions" w.p.ta do
+    exerciseCmd req SettleSubscription with
+      termsCid = w'.termsCid, registerCid = w'.registerCid, navCid = w'.navCid, credentialCid = w'.bobCred
+  (redeemReq, _) <- submit w.p.alice do
+    exerciseCmd holding RequestRedemption with custodian = w.p.custodian, amount = 1000.0
+  payout <- submit w.p.ta do
+    exerciseCmd redeemReq ApproveRedemption with termsCid = w'.termsCid, navCid = w'.navCid, credentialCid = w'.aliceCred
+  registerCid <- submit w.p.ta do exerciseCmd w'.registerCid SetStatus with newStatus = Suspended
+  custodianCash <- largestCash w.p.custodian
+  expectFailure "the fund is suspended" w.p.custodian do
+    exerciseCmd payout Pay with cashCid = custodianCash, registerCid, termsCid = w'.termsCid, navCid = w'.navCid
+  registerCid <- submit w.p.ta do exerciseCmd registerCid SetStatus with newStatus = SubscriptionsSuspended
+  _ <- submit w.p.custodian do
+    exerciseCmd payout Pay with cashCid = custodianCash, registerCid, termsCid = w'.termsCid, navCid = w'.navCid
+  pure ()
+
+-- | Amending the terms archives the old version, so a flow handed the old
+--   terms fails rather than running under superseded rules.
+amendedTermsSupersedeOldOnes : Script ()
+amendedTermsSupersedeOldOnes = do
+  w <- setup
+  Some terms <- queryContractId w.p.ta w.termsCid
+  newTermsCid <- submit w.p.ta do
+    exerciseCmd w.termsCid Amend with newTerms = terms with minSubscription = 100000.0, version = 2
+  req <- requestSubscription w w.p.bob 50000.0
+  submitMustFail w.p.ta do
+    exerciseCmd req SettleSubscription with
+      termsCid = w.termsCid, registerCid = w.registerCid, navCid = w.navCid, credentialCid = w.bobCred
+  expectFailure "minimum subscription" w.p.ta do
+    exerciseCmd req SettleSubscription with
+      termsCid = newTermsCid, registerCid = w.registerCid, navCid = w.navCid, credentialCid = w.bobCred
+  expectFailure "bump the version" w.p.ta do
+    exerciseCmd newTermsCid Amend with newTerms = terms with version = 2

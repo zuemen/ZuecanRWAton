@@ -1,0 +1,257 @@
+-- | Secondary market: transfers between investors, request-for-quote trades
+--   settled delivery-versus-payment, venue controls, enforcement, privacy.
+module Test.Secondary where
+
+import DA.Time
+import Daml.Script
+
+import Test.Setup
+import Zuecan.Cash
+import Zuecan.Compliance
+import Zuecan.Fund
+import Zuecan.Holding
+import Zuecan.Market
+import Zuecan.Types
+
+-- | Alice funded with units and a fresh custodian statement.
+funded : Script (World, ContractId FundHolding)
+funded = do
+  w <- setup
+  (holding, w) <- subscribe w w.p.alice w.aliceCred 100000.0
+  w <- attest w 100000.0 "custodian-statement-day-1"
+  pure (w, holding)
+
+-- | Alice quotes `amount` to Bob at `price`; Bob locks the notional and takes.
+quoteAndTake : World -> ContractId FundHolding -> Decimal -> Decimal -> Script (ContractId MatchedTrade, Optional (ContractId FundHolding))
+quoteAndTake w holding amount price = do
+  now <- getTime
+  let expiresAt = addRelTime now (hours 1)
+      settleWithin = hours 1
+  (order, rest) <- submit w.p.alice do
+    exerciseCmd holding ListForSale with
+      buyer = w.p.bob, operator = w.p.operator, amount, price
+      cashIssuer = w.p.usd, currency = "USD", expiresAt, settleWithin
+  bobCash <- largestCash w.p.bob
+  (locked, _) <- submit w.p.bob do
+    exerciseCmd bobCash Lock with
+      lockedTo = w.p.operator, payee = w.p.alice
+      lockAmount = floor6 (amount * price)
+      releaseAfter = addRelTime expiresAt settleWithin
+      purpose = "buy " <> w.instrument.symbol
+  trade <- submit w.p.bob do exerciseCmd order Take with lockedCashCid = locked
+  pure (trade, rest)
+
+settleCmd : World -> ContractId MatchedTrade -> Commands (ContractId FundHolding, ContractId CashHolding, ContractId TradePrint)
+settleCmd w trade = exerciseCmd trade Settle with
+  marketCid = w.marketCid, termsCid = w.termsCid, navCid = w.navCid
+  buyerCredentialCid = w.bobCred, sellerCredentialCid = w.aliceCred
+
+-- | Units and cash change hands in one transaction; the public sees price and
+--   size but not who traded; the regulator sees both sides.
+rfqTradeSettlesDeliveryVersusPayment : Script ()
+rfqTradeSettlesDeliveryVersusPayment = do
+  (w, holding) <- funded
+  (trade, _) <- quoteAndTake w holding 10000.0 1.0430
+  checkReconciles w
+  (delivered, _, tradePrint) <- submit w.p.operator (settleCmd w trade)
+
+  Some h <- queryContractId w.p.bob delivered
+  assertMsg "bob holds the units" (h.owner == w.p.bob && h.units == 10000.0)
+  aliceUnits <- unitsOf w.p.alice
+  assertMsg "alice delivered them" (aliceUnits == floor6 (100000.0 / launchNav) - 10000.0)
+  aliceCash <- cashOf w.p.alice
+  assertMsg "alice was paid the notional" (aliceCash == 900000.0 + 10430.0)
+  bobCash <- cashOf w.p.bob
+  assertMsg "bob paid it" (bobCash == 1000000.0 - 10430.0)
+
+  Some printed <- queryContractId w.p.public tradePrint
+  assertMsg "the public print carries price and size" (printed.units == 10000.0 && printed.price == 1.0430)
+  reports <- query @RegulatoryTradeReport w.p.regulator
+  assertMsg "the regulator gets both counterparties"
+    (case reports of [(_, r)] -> r.seller == w.p.alice && r.buyer == w.p.bob; _ -> False)
+  publicReports <- query @RegulatoryTradeReport w.p.public
+  assertMsg "identities are not public" (null publicReports)
+  checkReconciles w
+
+-- | A buyer must pass the same eligibility checks as a subscriber.
+ineligibleBuyerCannotReceiveUnits : Script ()
+ineligibleBuyerCannotReceiveUnits = do
+  (w, holding) <- funded
+  (trade, _) <- quoteAndTake w holding 10000.0 1.0430
+  -- Bob's credential is revoked between matching and settlement.
+  _ <- submit w.p.compliance do exerciseCmd w.bobCred Revoke with reason = "sanctions hit"
+  submitMustFail w.p.operator (settleCmd w trade)
+  -- A retail credential is no substitute.
+  expectFailure "credential belongs to a different investor" w.p.operator do
+    exerciseCmd trade Settle with
+      marketCid = w.marketCid, termsCid = w.termsCid, navCid = w.navCid
+      buyerCredentialCid = w.carolCred, sellerCredentialCid = w.aliceCred
+  checkReconciles w
+
+-- | The venue must not pay a seller who has since been sanctioned.
+sanctionedSellerIsNotPaid : Script ()
+sanctionedSellerIsNotPaid = do
+  (w, holding) <- funded
+  (trade, _) <- quoteAndTake w holding 10000.0 1.0430
+  -- Someone else's credential does not stand in for the seller's.
+  expectFailure "credential belongs to a different investor" w.p.operator do
+    exerciseCmd trade Settle with
+      marketCid = w.marketCid, termsCid = w.termsCid, navCid = w.navCid
+      buyerCredentialCid = w.bobCred, sellerCredentialCid = w.bobCred
+  _ <- submit w.p.compliance do exerciseCmd w.aliceCred Revoke with reason = "sanctions hit"
+  submitMustFail w.p.operator (settleCmd w trade)
+  -- Unwinding gives both sides their assets back.
+  (restored, _) <- submit w.p.operator do exerciseCmd trade Unwind with reason = "seller sanctioned"
+  Some r <- queryContractId w.p.alice restored
+  assertMsg "units back with the seller" (r.units == 10000.0)
+  checkReconciles w
+
+-- | Halts: the venue's own, and the regulator's, which only it can lift.
+haltsStopSettlement : Script ()
+haltsStopSettlement = do
+  (w, holding) <- funded
+  (trade, _) <- quoteAndTake w holding 10000.0 1.0430
+
+  marketCid <- submit w.p.regulator do exerciseCmd w.marketCid RegulatorHalt with reason = "coordinated halt in the underlying"
+  let w' = w with marketCid
+  expectFailure "the market is not trading" w.p.operator (settleCmd w' trade)
+  expectFailure "only the regulator can lift" w.p.operator do exerciseCmd marketCid OperatorResume
+  expectFailure "the regulator has halted" w.p.operator do exerciseCmd marketCid OperatorHalt with reason = "maintenance"
+  marketCid <- submit w.p.regulator do exerciseCmd marketCid RegulatorResume
+
+  marketCid <- submit w.p.operator do exerciseCmd marketCid OperatorHalt with reason = "maintenance"
+  expectFailure "the market is not trading" w.p.operator (settleCmd (w with marketCid) trade)
+  marketCid <- submit w.p.operator do exerciseCmd marketCid OperatorResume
+  _ <- submit w.p.operator (settleCmd (w with marketCid) trade)
+  checkReconciles w
+
+-- | The venue refuses prices far from NAV and trades above its size cap.
+priceBandAndSizeCap : Script ()
+priceBandAndSizeCap = do
+  (w, holding) <- funded
+  -- 5.5% over NAV against a 50 bp band.
+  (trade, Some rest) <- quoteAndTake w holding 10000.0 1.1000
+  expectFailure "outside the venue's band around NAV" w.p.operator (settleCmd w trade)
+  (restored, refund) <- submit w.p.operator do exerciseCmd trade Unwind with reason = "price outside band"
+  Some c <- queryContractId w.p.bob refund
+  assertMsg "bob's cash is released" (c.amount == floor6 (10000.0 * 1.1000))
+
+  marketCid <- submit w.p.operator do exerciseCmd w.marketCid SetLimits with newMaxTradeUnits = 5000.0, newMaxDeviationBps = 50.0
+  holding <- submit w.p.alice do exerciseCmd restored MergeUnits with otherCid = rest
+  (trade, _) <- quoteAndTake w holding 10000.0 1.0430
+  expectFailure "per-trade size cap" w.p.operator (settleCmd (w with marketCid) trade)
+  checkReconciles w
+
+-- | If the venue never settles, both sides get out once the deadline passes,
+--   and the venue cannot pay the seller after that.
+counterpartiesCanWalkAwayAfterTheDeadline : Script ()
+counterpartiesCanWalkAwayAfterTheDeadline = do
+  (w, holding) <- funded
+  (trade, _) <- quoteAndTake w holding 10000.0 1.0430
+  Some t <- queryContractId w.p.bob trade
+  -- The venue cannot pay the seller outside settlement.
+  submitMustFail w.p.operator do exerciseCmd t.lockedCashCid PayOut
+  expectFailure "still has until the deadline" w.p.alice do exerciseCmd trade Abort with actor = w.p.alice
+  expectFailure "only a counterparty can abort" w.p.operator do exerciseCmd trade Abort with actor = w.p.operator
+  passTime (hours 2)
+  w <- republishNav w launchNav
+  expectFailure "settlement deadline has passed" w.p.operator (settleCmd w trade)
+  restored <- submit w.p.alice do exerciseCmd trade Abort with actor = w.p.alice
+  expectFailureAs "the lock has lapsed" (actAs [w.p.operator, w.p.bob]) do exerciseCmd t.lockedCashCid PayOut
+  _ <- submit w.p.bob do exerciseCmd t.lockedCashCid Reclaim
+  bobCash <- cashOf w.p.bob
+  assertMsg "bob has all his cash back" (bobCash == 1000000.0)
+  Some r <- queryContractId w.p.alice restored
+  assertMsg "alice has her units back" (r.units == 10000.0)
+  checkReconciles w
+
+-- | The cash lock has to be exactly the one the order calls for.
+takeRequiresAMatchingLock : Script ()
+takeRequiresAMatchingLock = do
+  (w, holding) <- funded
+  now <- getTime
+  let expiresAt = addRelTime now (hours 1)
+  (order, _) <- submit w.p.alice do
+    exerciseCmd holding ListForSale with
+      buyer = w.p.bob, operator = w.p.operator, amount = 10000.0, price = 1.0430
+      cashIssuer = w.p.usd, currency = "USD", expiresAt, settleWithin = hours 1
+  let lockFor amount releaseAfter = do
+        cash <- largestCash w.p.bob
+        fst <$> submit w.p.bob do
+          exerciseCmd cash Lock with
+            lockedTo = w.p.operator, payee = w.p.alice, lockAmount = amount
+            releaseAfter, purpose = "buy"
+  short <- lockFor 10000.0 (addRelTime expiresAt (hours 1))
+  expectFailure "locked cash does not match the order" w.p.bob do exerciseCmd order Take with lockedCashCid = short
+  early <- lockFor 10430.0 (addRelTime now (minutes 30))
+  expectFailure "lapse exactly at the settlement deadline" w.p.bob do exerciseCmd order Take with lockedCashCid = early
+  passTime (hours 1)
+  ok <- lockFor 10430.0 (addRelTime expiresAt (hours 1))
+  expectFailure "the order has expired" w.p.bob do exerciseCmd order Take with lockedCashCid = ok
+  _ <- submit w.p.alice do exerciseCmd order CancelOrder
+  checkReconciles w
+
+-- | Off-venue transfers still need an eligible, consenting receiver.
+transfersNeedAnEligibleReceiver : Script ()
+transfersNeedAnEligibleReceiver = do
+  (w, holding) <- funded
+  (offer, Some rest) <- submit w.p.alice do
+    exerciseCmd holding OfferTransfer with receiver = w.p.carol, amount = 1000.0
+  -- Carol reads the public terms but is retail.
+  expectFailureAs "investor class is not eligible" (actAs w.p.carol <> readAs w.p.public) do
+    exerciseCmd offer AcceptTransfer with termsCid = w.termsCid, credentialCid = w.carolCred
+  back <- submit w.p.carol do exerciseCmd offer DeclineTransfer
+  (offer, _) <- submit w.p.alice do exerciseCmd back OfferTransfer with receiver = w.p.bob, amount = 1000.0
+  checkReconciles w
+  received <- submit (actAs w.p.bob <> readAs w.p.public) do
+    exerciseCmd offer AcceptTransfer with termsCid = w.termsCid, credentialCid = w.bobCred
+  Some r <- queryContractId w.p.bob received
+  assertMsg "bob received the units" (r.owner == w.p.bob && r.units == 1000.0)
+  (offer, _) <- submit w.p.alice do exerciseCmd rest OfferTransfer with receiver = w.p.bob, amount = 1.0
+  _ <- submit w.p.alice do exerciseCmd offer WithdrawTransfer
+  checkReconciles w
+
+-- | Legal holds and seizures are possible, recorded, and visible to the
+--   regulator and the holder.
+freezeAndSeizeUnderLegalOrder : Script ()
+freezeAndSeizeUnderLegalOrder = do
+  (w, holding) <- funded
+  frozen <- submit w.p.ta do exerciseCmd holding Freeze with reason = "court order 2026-TPE-001 (hold)"
+  now <- getTime
+  expectFailure "the holding is frozen" w.p.alice do
+    exerciseCmd frozen ListForSale with
+      buyer = w.p.bob, operator = w.p.operator, amount = 1000.0, price = 1.0430
+      cashIssuer = w.p.usd, currency = "USD", expiresAt = addRelTime now (hours 1), settleWithin = hours 1
+  expectFailure "the holding is frozen" w.p.alice do
+    exerciseCmd frozen RequestRedemption with custodian = w.p.custodian, amount = 1000.0
+  seized <- submit w.p.ta do exerciseCmd frozen Seize with legalOrderRef = "court order 2026-TPE-001 (turnover)"
+  Some s <- queryContractId w.p.ta seized
+  assertMsg "the units moved to the transfer agent" (s.owner == w.p.ta && s.frozen)
+  records <- query @EnforcementRecord w.p.regulator
+  assertMsg "the regulator sees both actions" (length records == 2)
+  aliceRecords <- query @EnforcementRecord w.p.alice
+  assertMsg "so does the holder" (length aliceRecords == 2)
+  checkReconciles w
+
+-- | Who can see what. Holdings are private to the holder, the transfer agent
+--   and the regulator; the register, NAV and reserve history are public.
+privacyOfHoldings : Script ()
+privacyOfHoldings = do
+  (w, _) <- funded
+  (_, w) <- subscribe w w.p.bob w.bobCred 50000.0
+  bobSees <- query @FundHolding w.p.bob
+  assertMsg "bob sees only his own holding" (all (\(_, h) -> h.owner == w.p.bob) bobSees && length bobSees == 1)
+  publicHoldings <- query @FundHolding w.p.public
+  assertMsg "the public sees no holdings" (null publicHoldings)
+  operatorHoldings <- query @FundHolding w.p.operator
+  assertMsg "the venue sees no holdings" (null operatorHoldings)
+  regulatorHoldings <- query @FundHolding w.p.regulator
+  assertMsg "the regulator sees all of them" (length regulatorHoldings == 2)
+  publicRegister <- query @FundRegister w.p.public
+  publicNav <- query @NavReport w.p.public
+  publicReserves <- query @ReserveAttestation w.p.public
+  assertMsg "the register, NAV and reserve history are public"
+    (length publicRegister == 1 && length publicNav == 1 && length publicReserves == 1)
+  bobCreds <- query @InvestorCredential w.p.bob
+  assertMsg "investors cannot see each other's KYC" (all (\(_, c) -> c.investor == w.p.bob) bobCreds)
+  checkReconciles w

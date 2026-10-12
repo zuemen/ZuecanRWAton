@@ -1,0 +1,444 @@
+-- | Fund units and every way they can move.
+--
+--   A holding is signed by both the transfer agent (registrar) and the owner:
+--   the registrar cannot take units away without a choice the owner agreed to
+--   by holding the contract, and the owner cannot move units without the
+--   registrar's rules running. Every path that delivers units to a new owner
+--   checks the receiver's credential against the fund's eligibility rules.
+--
+--   Units leaving a holding go into an escrow contract (a transfer offer, a
+--   sell order, a redemption request) signed by the same two parties, so they
+--   cannot be spent twice while the counterparty decides.
+module Zuecan.Holding
+  ( FundHolding (..)
+  , TransferOffer (..)
+  , SellOrder (..)
+  , MatchedTrade (..)
+  , RedemptionRequest (..)
+  , RedemptionPayout (..)
+  , EnforcementRecord (..)
+  , SplitUnits (..)
+  , MergeUnits (..)
+  , OfferTransfer (..)
+  , ListForSale (..)
+  , RequestRedemption (..)
+  , Freeze (..)
+  , Unfreeze (..)
+  , Seize (..)
+  , AcceptTransfer (..)
+  , DeclineTransfer (..)
+  , WithdrawTransfer (..)
+  , Take (..)
+  , CancelOrder (..)
+  , Settle (..)
+  , Unwind (..)
+  , Abort (..)
+  , ApproveRedemption (..)
+  , RejectRedemption (..)
+  , CancelRedemption (..)
+  , Pay (..)
+  , CancelPayout (..)
+  , settlementDeadline
+  ) where
+
+import DA.Time
+import qualified Zuecan.Cash as Cash
+import Zuecan.Compliance (InvestorCredential, checkEligible, checkScreened)
+import Zuecan.Fund
+import Zuecan.Market
+import Zuecan.Types
+
+template FundHolding
+  with
+    instrument : InstrumentId
+    owner : Party
+    units : Decimal
+    frozen : Bool
+    regulator : Party
+  where
+    signatory instrument.registrar, owner
+    observer regulator
+    ensure units > 0.0 && units == floor6 units
+
+    choice SplitUnits : (ContractId FundHolding, ContractId FundHolding)
+      with
+        amount : Decimal
+      controller owner
+      do
+        assertMsg "the holding is frozen" (not frozen)
+        assertMsg "split amount must be strictly between zero and the holding" (amount > 0.0 && amount < units)
+        a <- create this with units = amount
+        b <- create this with units = units - amount
+        pure (a, b)
+
+    choice MergeUnits : ContractId FundHolding
+      with
+        otherCid : ContractId FundHolding
+      controller owner
+      do
+        other <- fetch otherCid
+        assertMsg "can only merge holdings of the same instrument and owner"
+          (other.instrument == instrument && other.owner == owner && other.regulator == regulator)
+        assertMsg "the holding is frozen" (not frozen && not other.frozen)
+        archive otherCid
+        create this with units = units + other.units
+
+    -- | Offer units to another investor off-venue (a gift, an internal
+    --   reallocation). The receiver must accept and pass eligibility.
+    choice OfferTransfer : (ContractId TransferOffer, Optional (ContractId FundHolding))
+      with
+        receiver : Party
+        amount : Decimal
+      controller owner
+      do
+        rest <- carveOut this amount
+        offer <- create TransferOffer with
+          instrument, sender = owner, receiver, units = amount, regulator
+        pure (offer, rest)
+
+    -- | Quote units to one buyer (the request-for-quote reply) at `price` per
+    --   unit until `expiresAt`. The venue then has `settleWithin` to settle.
+    choice ListForSale : (ContractId SellOrder, Optional (ContractId FundHolding))
+      with
+        buyer : Party
+        operator : Party
+        amount : Decimal
+        price : Decimal
+        cashIssuer : Party
+        currency : Text
+        expiresAt : Time
+        settleWithin : RelTime
+      controller owner
+      do
+        assertMsg "price must be positive" (price > 0.0)
+        assertMsg "the settlement window must be positive" (settleWithin > seconds 0)
+        assertMsg "cannot sell to yourself" (buyer /= owner)
+        rest <- carveOut this amount
+        order <- create SellOrder with
+          instrument, seller = owner, buyer, operator, regulator
+          units = amount, price, cashIssuer, currency, expiresAt, settleWithin
+        pure (order, rest)
+
+    choice RequestRedemption : (ContractId RedemptionRequest, Optional (ContractId FundHolding))
+      with
+        custodian : Party
+        amount : Decimal
+      controller owner
+      do
+        now <- getTime
+        rest <- carveOut this amount
+        request <- create RedemptionRequest with
+          instrument, investor = owner, custodian, regulator, units = amount, requestedAt = now
+        pure (request, rest)
+
+    -- | Legal or regulatory hold. A frozen holding cannot be split, merged,
+    --   offered, listed or redeemed.
+    choice Freeze : ContractId FundHolding
+      with
+        reason : Text
+      controller instrument.registrar
+      do
+        _ <- recordEnforcement this "freeze" reason
+        create this with frozen = True
+
+    choice Unfreeze : ContractId FundHolding
+      with
+        reason : Text
+      controller instrument.registrar
+      do
+        _ <- recordEnforcement this "unfreeze" reason
+        create this with frozen = False
+
+    -- | Move the units to the registrar's own account under a court or
+    --   regulatory order (the transfer agent's recovery power).
+    choice Seize : ContractId FundHolding
+      with
+        legalOrderRef : Text
+      controller instrument.registrar
+      do
+        assertMsg "a legal order reference is required" (legalOrderRef /= "")
+        _ <- recordEnforcement this "seize" legalOrderRef
+        create this with owner = instrument.registrar, frozen = True
+
+template TransferOffer
+  with
+    instrument : InstrumentId
+    sender : Party
+    receiver : Party
+    units : Decimal
+    regulator : Party
+  where
+    signatory instrument.registrar, sender
+    observer receiver, regulator
+
+    choice AcceptTransfer : ContractId FundHolding
+      with
+        termsCid : ContractId FundTerms
+        credentialCid : ContractId InvestorCredential
+      controller receiver
+      do
+        now <- getTime
+        terms <- fetch termsCid
+        checkTermsFor instrument terms
+        cred <- fetch credentialCid
+        checkEligible terms.compliance receiver terms.eligibility now cred
+        deliver instrument receiver units regulator
+
+    choice DeclineTransfer : ContractId FundHolding
+      controller receiver
+      do deliver instrument sender units regulator
+
+    choice WithdrawTransfer : ContractId FundHolding
+      controller sender
+      do deliver instrument sender units regulator
+
+-- | A firm quote to one buyer. Taking it requires the buyer to have locked
+--   exactly the notional for the venue to pay the seller.
+template SellOrder
+  with
+    instrument : InstrumentId
+    seller : Party
+    buyer : Party
+    operator : Party
+    regulator : Party
+    units : Decimal
+    price : Decimal
+    cashIssuer : Party
+    currency : Text
+    expiresAt : Time
+    settleWithin : RelTime
+  where
+    signatory instrument.registrar, seller
+    observer buyer, operator, regulator
+
+    choice Take : ContractId MatchedTrade
+      with
+        lockedCashCid : ContractId Cash.LockedCash
+      controller buyer
+      do
+        now <- getTime
+        assertMsg "the order has expired" (now < expiresAt)
+        lc <- fetch lockedCashCid
+        let notional = floor6 (units * price)
+            deadline = settlementDeadline this
+        assertMsg "locked cash does not match the order"
+          (lc.owner == buyer && lc.lockedTo == operator && lc.payee == seller
+            && lc.issuer == cashIssuer && lc.currency == currency && lc.amount == notional)
+        -- The lock must lapse exactly when the venue's time to settle does:
+        -- earlier and the buyer could pull the cash mid-settlement, later and
+        -- the venue could still pay the seller after the trade was aborted.
+        assertMsg "the cash lock must lapse exactly at the settlement deadline" (lc.releaseAfter == deadline)
+        create MatchedTrade with
+          instrument, seller, buyer, operator, regulator, units, price
+          cashIssuer, currency, lockedCashCid, matchedAt = now, deadline
+
+    choice CancelOrder : ContractId FundHolding
+      controller seller
+      do deliver instrument seller units regulator
+
+-- | Both sides committed; the venue settles delivery-versus-payment in one
+--   transaction or unwinds. If it does neither by `deadline`, either
+--   counterparty can walk away.
+template MatchedTrade
+  with
+    instrument : InstrumentId
+    seller : Party
+    buyer : Party
+    operator : Party
+    regulator : Party
+    units : Decimal
+    price : Decimal
+    cashIssuer : Party
+    currency : Text
+    lockedCashCid : ContractId Cash.LockedCash
+    matchedAt : Time
+    deadline : Time
+  where
+    signatory instrument.registrar, seller, buyer
+    observer operator, regulator
+
+    choice Settle : (ContractId FundHolding, ContractId Cash.CashHolding, ContractId TradePrint)
+      with
+        marketCid : ContractId MarketControl
+        termsCid : ContractId FundTerms
+        navCid : ContractId NavReport
+        buyerCredentialCid : ContractId InvestorCredential
+        sellerCredentialCid : ContractId InvestorCredential
+      controller operator
+      do
+        now <- getTime
+        assertMsg "the settlement deadline has passed" (now < deadline)
+        market <- fetch marketCid
+        assertMsg "market control is for another venue or instrument"
+          (market.operator == operator && market.instrument == instrument)
+        assertMsg ("the market is not trading: " <> show market.status) (market.status == Trading)
+        assertMsg "the trade exceeds the venue's per-trade size cap" (units <= market.maxTradeUnits)
+        terms <- fetch termsCid
+        checkTermsFor instrument terms
+        assertMsg "this venue is not the fund's approved venue" (terms.operator == operator)
+        assertMsg "the regulator on the trade is not the fund's regulator" (terms.regulator == regulator)
+        assertMsg "settlement cash is not the fund's settlement asset"
+          (terms.cashIssuer == cashIssuer && terms.currency == currency)
+        nav <- fetch navCid
+        checkNav terms now nav
+        assertMsg "the price is outside the venue's band around NAV"
+          (bpsDeviation nav.navPerUnit price <= market.maxDeviationBps)
+        buyerCred <- fetch buyerCredentialCid
+        checkEligible terms.compliance buyer terms.eligibility now buyerCred
+        -- Paying a seller who has since been sanctioned is itself a violation.
+        sellerCred <- fetch sellerCredentialCid
+        checkScreened terms.compliance seller terms.eligibility now sellerCred
+        paid <- exercise lockedCashCid Cash.PayOut
+        delivered <- deliver instrument buyer units regulator
+        tradePrint <- create TradePrint with
+          operator, instrument, readers = [terms.publicParty, regulator]
+          units, price, currency, navAtExecution = nav.navPerUnit, executedAt = now
+        _ <- create RegulatoryTradeReport with
+          operator, regulator, instrument, seller, buyer, units, price, currency, executedAt = now
+        pure (delivered, paid, tradePrint)
+
+    choice Unwind : (ContractId FundHolding, ContractId Cash.CashHolding)
+      with
+        reason : Text
+      controller operator
+      do
+        refund <- exercise lockedCashCid Cash.Release
+        restored <- deliver instrument seller units regulator
+        pure (restored, refund)
+
+    -- | The seller takes the units back once the venue's time is up. The
+    --   buyer's cash lock lapses at the same moment, so the buyer reclaims it
+    --   with LockedCash.Reclaim.
+    choice Abort : ContractId FundHolding
+      with
+        actor : Party
+      controller actor
+      do
+        assertMsg "only a counterparty can abort" (actor == seller || actor == buyer)
+        now <- getTime
+        assertMsg "the venue still has until the deadline to settle" (now >= deadline)
+        deliver instrument seller units regulator
+
+template RedemptionRequest
+  with
+    instrument : InstrumentId
+    investor : Party
+    custodian : Party
+    regulator : Party
+    units : Decimal
+    requestedAt : Time
+  where
+    signatory instrument.registrar, investor
+    observer custodian, regulator
+
+    -- | Forward pricing: units are redeemed at the NAV current when the
+    --   transfer agent processes the request, not the one when it was made.
+    choice ApproveRedemption : ContractId RedemptionPayout
+      with
+        termsCid : ContractId FundTerms
+        navCid : ContractId NavReport
+        credentialCid : ContractId InvestorCredential
+      controller instrument.registrar
+      do
+        now <- getTime
+        terms <- fetch termsCid
+        checkTermsFor instrument terms
+        assertMsg "the request names a custodian that is not the fund's" (terms.custodian == custodian)
+        nav <- fetch navCid
+        checkNav terms now nav
+        cred <- fetch credentialCid
+        checkScreened terms.compliance investor terms.eligibility now cred
+        assertMsg "below the fund's minimum redemption" (units >= terms.minRedemptionUnits)
+        let cashAmount = floor6 (units * nav.navPerUnit)
+        assertMsg "the redemption is worth less than one cent" (cashAmount >= 0.01)
+        create RedemptionPayout with
+          instrument, investor, custodian, regulator, units, cashAmount
+          navPerUnit = nav.navPerUnit, approvedAt = now
+
+    choice RejectRedemption : ContractId FundHolding
+      with
+        reason : Text
+      controller instrument.registrar
+      do deliver instrument investor units regulator
+
+    choice CancelRedemption : ContractId FundHolding
+      controller investor
+      do deliver instrument investor units regulator
+
+-- | The transfer agent has struck the price; the custodian pays out of the
+--   fund's cash and the units are retired in the same transaction.
+template RedemptionPayout
+  with
+    instrument : InstrumentId
+    investor : Party
+    custodian : Party
+    regulator : Party
+    units : Decimal
+    cashAmount : Decimal
+    navPerUnit : Decimal
+    approvedAt : Time
+  where
+    signatory instrument.registrar, investor
+    observer custodian, regulator
+
+    choice Pay : (ContractId Cash.CashHolding, ContractId FundRegister)
+      with
+        cashCid : ContractId Cash.CashHolding
+        registerCid : ContractId FundRegister
+        termsCid : ContractId FundTerms
+        navCid : ContractId NavReport
+      controller custodian
+      do
+        terms <- fetch termsCid
+        checkTermsFor instrument terms
+        cash <- fetch cashCid
+        assertMsg "payment must be in the fund's settlement asset"
+          (cash.issuer == terms.cashIssuer && cash.currency == terms.currency)
+        (paid, _) <- exercise cashCid Cash.Transfer with newOwner = investor, transferAmount = cashAmount
+        register <- exercise registerCid RecordRedemption with units, cashOut = cashAmount, termsCid, navCid
+        pure (paid, register)
+
+    choice CancelPayout : ContractId FundHolding
+      with
+        reason : Text
+      controller instrument.registrar
+      do deliver instrument investor units regulator
+
+-- | Audit trail of freezes, unfreezes and seizures.
+template EnforcementRecord
+  with
+    registrar : Party
+    owner : Party
+    regulator : Party
+    action : Text
+    reference : Text
+    units : Decimal
+    recordedAt : Time
+  where
+    signatory registrar
+    observer owner, regulator
+
+-- | When the venue must have settled a trade on `order`.
+settlementDeadline : SellOrder -> Time
+settlementDeadline order = addRelTime order.expiresAt order.settleWithin
+
+-- | Take `amount` out of a holding for an escrow; returns what is left.
+carveOut : FundHolding -> Decimal -> Update (Optional (ContractId FundHolding))
+carveOut h amount = do
+  assertMsg "the holding is frozen" (not h.frozen)
+  assertMsg "amount must be positive and covered by the holding" (amount > 0.0 && amount <= h.units)
+  assertMsg "amount has more than six decimal places" (amount == floor6 amount)
+  if amount == h.units
+    then pure None
+    else Some <$> create h with units = h.units - amount
+
+deliver : InstrumentId -> Party -> Decimal -> Party -> Update (ContractId FundHolding)
+deliver instrument owner units regulator =
+  create FundHolding with instrument, owner, units, frozen = False, regulator
+
+recordEnforcement : FundHolding -> Text -> Text -> Update (ContractId EnforcementRecord)
+recordEnforcement h action reference = do
+  now <- getTime
+  create EnforcementRecord with
+    registrar = h.instrument.registrar, owner = h.owner, regulator = h.regulator
+    action, reference, units = h.units, recordedAt = now

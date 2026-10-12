@@ -1,0 +1,36 @@
+name: Daml
+
+# Build both packages and run every Daml Script scenario. The SDK comes from the
+# official Docker image pinned by digest (3.4 stable is only published through
+# dpm). Fails if any scenario fails, or if a choice other than the built-in
+# Archive is never exercised by a test.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: daml-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # digitalasset/daml-sdk:3.4.0-rc2
+  DAML_IMAGE: digitalasset/daml-sdk@sha256:a01ad67343b07e9281ac1b99b791c6dc92337e85b2d4bd9e4f392421c2b4613a
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Pull the Daml SDK image
+        run: docker pull "$DAML_IMAGE"
+
+      - name: Build and test
+        run: scripts/daml-test.sh

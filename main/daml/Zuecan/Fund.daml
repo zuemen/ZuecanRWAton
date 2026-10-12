@@ -1,0 +1,297 @@
+-- | The fund itself: its terms, its daily NAV, and the register that ties the
+--   number of units outstanding to the reserves the custodian attests to.
+--
+--   The instrument is a tokenized government money-market fund (short-term
+--   US Treasury bills and Treasury repo). Units are accumulating: income is
+--   reflected in a rising NAV rather than paid out, as in OUSG. The register
+--   enforces the property that separates a tokenized asset from a synthetic
+--   one: no unit can be issued unless attested reserves cover every unit
+--   outstanding at NAV.
+module Zuecan.Fund
+  ( FundStatus (..)
+  , FundTerms (..)
+  , NavReport (..)
+  , FundRegister (..)
+  , RegisterProposal (..)
+  , ReserveAttestation (..)
+  , AcceptAppointment (..)
+  , Amend (..)
+  , Republish (..)
+  , Attest (..)
+  , RecordIssuance (..)
+  , RecordRedemption (..)
+  , SetStatus (..)
+  , checkTermsFor
+  , checkNav
+  , liability
+  , coverage
+  ) where
+
+import DA.Time (RelTime)
+import Zuecan.Cash (CashHolding, LockedCash (..), PayOut (..))
+import Zuecan.Compliance (Eligibility (..), InvestorCredential, checkEligible)
+import Zuecan.Types
+
+data FundStatus
+  = Open                    -- ^ subscriptions and redemptions
+  | SubscriptionsSuspended  -- ^ redemptions only
+  | Suspended               -- ^ neither (e.g. pending a NAV correction)
+  deriving (Eq, Show)
+
+-- | The fund's offering terms, signed by the transfer agent. `offeringDocHash`
+--   commits to the off-ledger prospectus or private placement memorandum.
+template FundTerms
+  with
+    instrument : InstrumentId
+    name : Text
+    strategy : Text
+    currency : Text
+    cashIssuer : Party       -- ^ the only settlement asset accepted
+    custodian : Party        -- ^ holds the Treasury bills and the fund's cash
+    navAgent : Party         -- ^ fund administrator that strikes the NAV
+    compliance : Party       -- ^ KYC/AML agent whose credentials the fund accepts
+    operator : Party         -- ^ secondary-market venue
+    regulator : Party
+    publicParty : Party      -- ^ read-only party for public disclosure
+    eligibility : Eligibility
+    minSubscription : Decimal     -- ^ in `currency`
+    minRedemptionUnits : Decimal
+    maxNavAge : RelTime
+    maxAttestationAge : RelTime
+    offeringDocHash : Text
+    version : Int
+  where
+    signatory instrument.registrar
+    observer custodian, navAgent, compliance, operator, regulator, publicParty
+    ensure name /= "" && currency /= "" && offeringDocHash /= ""
+      && minSubscription > 0.0 && minRedemptionUnits > 0.0
+      && not (null eligibility.allowedClasses)
+      && not (null eligibility.allowedJurisdictions)
+
+    -- | A new version of the terms. Archiving the old one makes every flow
+    --   that is handed the old contract id fail, so changes take effect at once.
+    choice Amend : ContractId FundTerms
+      with
+        newTerms : FundTerms
+      controller instrument.registrar
+      do
+        assertMsg "an amendment cannot change the instrument" (newTerms.instrument == instrument)
+        assertMsg "an amendment must bump the version by one" (newTerms.version == version + 1)
+        create newTerms
+
+-- | The NAV per unit struck by the fund administrator. Republishing archives
+--   the previous report, so only the latest one is ever live.
+template NavReport
+  with
+    instrument : InstrumentId
+    navAgent : Party
+    readers : [Party]
+    navPerUnit : Decimal
+    asOf : Time
+    seq : Int
+    methodologyRef : Text
+  where
+    signatory navAgent
+    observer instrument.registrar, readers
+    ensure navPerUnit > 0.0 && methodologyRef /= ""
+
+    choice Republish : ContractId NavReport
+      with
+        newNavPerUnit : Decimal
+        newMethodologyRef : Text
+      controller navAgent
+      do
+        now <- getTime
+        create this with
+          navPerUnit = newNavPerUnit
+          asOf = now
+          seq = seq + 1
+          methodologyRef = newMethodologyRef
+
+-- | The custodian's statement of what it holds for the fund, kept as a public
+--   history (proof of reserves). The live figure the register uses is copied
+--   into the register in the same transaction.
+template ReserveAttestation
+  with
+    instrument : InstrumentId
+    custodian : Party
+    readers : [Party]
+    reserveValue : Decimal
+    attestedAt : Time
+    seq : Int
+    statementRef : Text
+  where
+    signatory custodian
+    observer instrument.registrar, readers
+
+-- | The transfer agent appoints the custodian; the register only exists once
+--   the custodian accepts.
+template RegisterProposal
+  with
+    instrument : InstrumentId
+    custodian : Party
+    readers : [Party]
+  where
+    signatory instrument.registrar
+    observer custodian
+
+    choice AcceptAppointment : ContractId FundRegister
+      controller custodian
+      do
+        now <- getTime
+        create FundRegister with
+          instrument, custodian, readers
+          outstanding = 0.0
+          attestedReserve = 0.0
+          attestedAt = now
+          attestationSeq = 0
+          statementRef = "appointment"
+          netFlowSinceAttestation = 0.0
+          status = Open
+
+-- | The register of record. Every issuance and redemption goes through it, so
+--   `outstanding` is the authoritative unit count, and the coverage check
+--   runs on every issuance.
+--
+--   It is under dual control: signed by both the transfer agent and the
+--   custodian, so neither can archive it and start a new one with a different
+--   unit count or reserve figure on its own.
+--
+--   `netFlowSinceAttestation` is the cash that came in (subscriptions) or
+--   went out (redemptions) on-ledger since the custodian's last statement; the
+--   custodian resets it to zero when it attests, because its new statement
+--   already includes that cash.
+template FundRegister
+  with
+    instrument : InstrumentId
+    custodian : Party
+    readers : [Party]
+    outstanding : Decimal
+    attestedReserve : Decimal
+    attestedAt : Time
+    attestationSeq : Int
+    statementRef : Text
+    netFlowSinceAttestation : Decimal
+    status : FundStatus
+  where
+    signatory instrument.registrar, custodian
+    observer readers
+    ensure outstanding >= 0.0 && attestedReserve >= 0.0
+
+    choice Attest : (ContractId FundRegister, ContractId ReserveAttestation)
+      with
+        reserveValue : Decimal
+        newStatementRef : Text
+      controller custodian
+      do
+        assertMsg "reserve value cannot be negative" (reserveValue >= 0.0)
+        assertMsg "a statement reference is required" (newStatementRef /= "")
+        now <- getTime
+        let seq' = attestationSeq + 1
+        record <- create ReserveAttestation with
+          instrument, custodian, readers, reserveValue
+          attestedAt = now
+          seq = seq'
+          statementRef = newStatementRef
+        register <- create this with
+          attestedReserve = reserveValue
+          attestedAt = now
+          attestationSeq = seq'
+          statementRef = newStatementRef
+          netFlowSinceAttestation = 0.0
+        pure (register, record)
+
+    -- | The only way units come into existence against the register. It needs
+    --   the subscriber's authority as well as the transfer agent's, so the
+    --   transfer agent cannot issue on its own; it consumes the subscriber's
+    --   cash lock, so the cash it counts is real and counted once; and it
+    --   prices the units itself, so the caller cannot choose how many.
+    --   Returns the new register, the units issued and the custodian's cash.
+    choice RecordIssuance : (ContractId FundRegister, Decimal, ContractId CashHolding)
+      with
+        subscriber : Party
+        lockedCashCid : ContractId LockedCash
+        credentialCid : ContractId InvestorCredential
+        termsCid : ContractId FundTerms
+        navCid : ContractId NavReport
+      controller instrument.registrar, subscriber
+      do
+        now <- getTime
+        terms <- fetch termsCid
+        checkTermsFor instrument terms
+        assertMsg "the register's custodian is not the fund's custodian" (terms.custodian == custodian)
+        nav <- fetch navCid
+        checkNav terms now nav
+        cred <- fetch credentialCid
+        checkEligible terms.compliance subscriber terms.eligibility now cred
+        assertMsg "the fund is not open for subscriptions" (status == Open)
+        assertMsg "the custodian's reserve attestation is out of date"
+          (isWithin terms.maxAttestationAge now attestedAt)
+        lc <- fetch lockedCashCid
+        assertMsg "the escrowed cash is not the subscriber's, held for this fund's custodian in its settlement asset"
+          (lc.owner == subscriber && lc.lockedTo == instrument.registrar && lc.payee == custodian
+            && lc.issuer == terms.cashIssuer && lc.currency == terms.currency)
+        assertMsg "below the fund's minimum subscription" (lc.amount >= terms.minSubscription)
+        let units = floor6 (lc.amount / nav.navPerUnit)
+        assertMsg "the subscription buys less than one millionth of a unit" (units > 0.0)
+        let next = this with
+              outstanding = outstanding + units
+              netFlowSinceAttestation = netFlowSinceAttestation + lc.amount
+        assertMsg "issuance would leave units not fully backed by attested reserves"
+          (liability next nav.navPerUnit <= coverage next)
+        custodyCash <- exercise lockedCashCid PayOut
+        register <- create next
+        pure (register, units, custodyCash)
+
+    -- | Retire units against a payment. Needs both the transfer agent and the
+    --   custodian, who is the one paying (RedemptionPayout.Pay).
+    choice RecordRedemption : ContractId FundRegister
+      with
+        units : Decimal
+        cashOut : Decimal
+        termsCid : ContractId FundTerms
+        navCid : ContractId NavReport
+      controller instrument.registrar, custodian
+      do
+        now <- getTime
+        terms <- fetch termsCid
+        checkTermsFor instrument terms
+        nav <- fetch navCid
+        checkNav terms now nav
+        assertMsg "the fund is suspended" (status /= Suspended)
+        assertMsg "the custodian's reserve attestation is out of date"
+          (isWithin terms.maxAttestationAge now attestedAt)
+        assertMsg "cannot redeem more units than are outstanding" (units > 0.0 && units <= outstanding)
+        assertMsg "a redemption must pay out cash" (cashOut > 0.0)
+        -- Paying redeemers at NAV out of a reserve that no longer covers
+        -- everyone favours whoever leaves first. Stop and reprice instead.
+        assertMsg "reserves are below liabilities at NAV; redemptions wait for the NAV agent and custodian to reconcile"
+          (liability this nav.navPerUnit <= coverage this)
+        create this with
+          outstanding = outstanding - units
+          netFlowSinceAttestation = netFlowSinceAttestation - cashOut
+
+    choice SetStatus : ContractId FundRegister
+      with
+        newStatus : FundStatus
+      controller instrument.registrar
+      do create this with status = newStatus
+
+-- | Units outstanding valued at `navPerUnit`.
+liability : FundRegister -> Decimal -> Decimal
+liability register navPerUnit = register.outstanding * navPerUnit
+
+-- | What backs the units: the last attested reserve plus on-ledger flows since.
+coverage : FundRegister -> Decimal
+coverage register = register.attestedReserve + register.netFlowSinceAttestation
+
+checkTermsFor : InstrumentId -> FundTerms -> Update ()
+checkTermsFor instrument terms =
+  assertMsg "terms are for a different instrument" (terms.instrument == instrument)
+
+-- | The NAV is this fund's, from its NAV agent, and fresh.
+checkNav : FundTerms -> Time -> NavReport -> Update ()
+checkNav terms now nav = do
+  assertMsg "NAV is for a different instrument" (nav.instrument == terms.instrument)
+  assertMsg "NAV was not struck by the fund's NAV agent" (nav.navAgent == terms.navAgent)
+  assertMsg "NAV is out of date" (isWithin terms.maxNavAge now nav.asOf)

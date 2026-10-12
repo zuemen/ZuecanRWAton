@@ -1,0 +1,60 @@
+-- | Primary issuance. The investor escrows cash for the fund's custodian and
+--   asks for units; the transfer agent issues them at the NAV current when it
+--   settles (forward pricing), and only if attested reserves still cover every
+--   unit afterwards.
+module Zuecan.Subscription
+  ( SubscriptionRequest (..)
+  , SettleSubscription (..)
+  , RejectSubscription (..)
+  , CancelSubscription (..)
+  ) where
+
+import qualified Zuecan.Cash as Cash
+import Zuecan.Compliance (InvestorCredential)
+import Zuecan.Fund
+import Zuecan.Holding (FundHolding (..))
+import Zuecan.Types (InstrumentId (..))
+
+template SubscriptionRequest
+  with
+    instrument : InstrumentId
+    investor : Party
+    cashAmount : Decimal
+    lockedCashCid : ContractId Cash.LockedCash
+  where
+    signatory investor
+    observer instrument.registrar
+    ensure cashAmount > 0.0
+
+    choice SettleSubscription : (ContractId FundHolding, ContractId FundRegister, ContractId Cash.CashHolding)
+      with
+        termsCid : ContractId FundTerms
+        registerCid : ContractId FundRegister
+        navCid : ContractId NavReport
+        credentialCid : ContractId InvestorCredential
+      controller instrument.registrar
+      do
+        terms <- fetch termsCid
+        checkTermsFor instrument terms
+        lc <- fetch lockedCashCid
+        assertMsg "the escrowed cash does not match the request" (lc.amount == cashAmount)
+        -- The register checks eligibility, prices the units, takes the cash
+        -- and enforces reserve coverage; this request supplies the investor's
+        -- authority for it and for the holding.
+        (register, units, custodyCash) <- exercise registerCid RecordIssuance with
+          subscriber = investor, lockedCashCid, credentialCid, termsCid, navCid
+        holding <- create FundHolding with
+          instrument, owner = investor, units, frozen = False, regulator = terms.regulator
+        pure (holding, register, custodyCash)
+
+    choice RejectSubscription : ContractId Cash.CashHolding
+      with
+        reason : Text
+      controller instrument.registrar
+      do exercise lockedCashCid Cash.Release
+
+    -- | The investor withdraws the request; the escrowed cash comes back with
+    --   LockedCash.Reclaim once its lock lapses.
+    choice CancelSubscription : ()
+      controller investor
+      do pure ()

@@ -1,0 +1,241 @@
+-- | A fully onboarded test world and the helpers the scenarios share.
+module Test.Setup where
+
+import DA.Foldable (forA_)
+import DA.Text (isInfixOf)
+import DA.Time
+import Daml.Script
+
+import Zuecan.Cash
+import Zuecan.Compliance
+import Zuecan.Fund
+import Zuecan.Holding
+import Zuecan.Market
+import Zuecan.Subscription
+import Zuecan.Types
+
+data Parties = Parties
+  with
+    ta : Party          -- ^ transfer agent: keeps the register, signs every holding
+    custodian : Party   -- ^ holds the Treasury bills and the fund's cash
+    navAgent : Party    -- ^ fund administrator
+    compliance : Party  -- ^ KYC/AML agent
+    operator : Party    -- ^ secondary-market venue
+    regulator : Party
+    public : Party      -- ^ read-only disclosure party
+    usd : Party         -- ^ settlement stablecoin issuer
+    alice : Party       -- ^ US accredited investor
+    bob : Party         -- ^ Taiwan professional investor
+    carol : Party       -- ^ retail investor: onboarded, but not eligible for this fund
+    dave : Party        -- ^ never onboarded
+
+data World = World
+  with
+    p : Parties
+    instrument : InstrumentId
+    termsCid : ContractId FundTerms
+    registerCid : ContractId FundRegister
+    navCid : ContractId NavReport
+    marketCid : ContractId MarketControl
+    aliceCred : ContractId InvestorCredential
+    bobCred : ContractId InvestorCredential
+    carolCred : ContractId InvestorCredential
+
+launchNav : Decimal
+launchNav = 1.0425
+
+allocateParties : Script Parties
+allocateParties = do
+  let party hint = allocatePartyByHint (PartyIdHint hint)
+  ta <- party "TransferAgent"
+  custodian <- party "Custodian"
+  navAgent <- party "FundAdministrator"
+  compliance <- party "KycAgent"
+  operator <- party "VenueOperator"
+  regulator <- party "Regulator"
+  public <- party "Public"
+  usd <- party "UsdIssuer"
+  alice <- party "Alice"
+  bob <- party "Bob"
+  carol <- party "Carol"
+  dave <- party "Dave"
+  pure Parties with ..
+
+-- | Investor asks, compliance agent approves.
+onboard : Parties -> Party -> InvestorClass -> Text -> Script (ContractId InvestorCredential)
+onboard p investor cls jurisdiction = do
+  req <- submit investor do
+    createCmd CredentialRequest with
+      investor
+      compliance = p.compliance
+      requestedClass = cls
+      jurisdiction
+      evidenceHash = "sha256:kyc-file-" <> partyToText investor
+  submit p.compliance do
+    exerciseCmd req Approve with
+      grantedClass = cls
+      validFor = days 365
+      relying = [p.ta, p.operator]
+      regulator = p.regulator
+
+fundTerms : Parties -> InstrumentId -> FundTerms
+fundTerms p instrument = FundTerms with
+  instrument
+  name = "Zuecan Treasury Money Market Fund"
+  strategy = "Government money-market fund: US Treasury bills (<= 397 days) and Treasury repo"
+  currency = "USD"
+  cashIssuer = p.usd
+  custodian = p.custodian
+  navAgent = p.navAgent
+  compliance = p.compliance
+  operator = p.operator
+  regulator = p.regulator
+  publicParty = p.public
+  eligibility = Eligibility with
+    allowedClasses = [Accredited, QualifiedPurchaser, Professional, Institutional]
+    allowedJurisdictions = ["US", "TW", "SG"]
+    maxScreeningAge = days 90
+  minSubscription = 1000.0
+  minRedemptionUnits = 1.0
+  maxNavAge = hours 30
+  maxAttestationAge = hours 30
+  offeringDocHash = "sha256:offering-memorandum-v1"
+  version = 1
+
+setup : Script World
+setup = do
+  p <- allocateParties
+  let instrument = InstrumentId with registrar = p.ta, symbol = "ZTMMF"
+  now <- getTime
+
+  termsCid <- submit p.ta do createCmd (fundTerms p instrument)
+  navCid <- submit p.navAgent do
+    createCmd NavReport with
+      instrument
+      navAgent = p.navAgent
+      readers = [p.custodian, p.operator, p.regulator, p.public]
+      navPerUnit = launchNav
+      asOf = now
+      seq = 1
+      methodologyRef = "amortized-cost; T-bills marked daily"
+  proposal <- submit p.ta do
+    createCmd RegisterProposal with
+      instrument, custodian = p.custodian, readers = [p.regulator, p.public]
+  registerCid <- submit p.custodian do exerciseCmd proposal AcceptAppointment
+  marketCid <- submit p.operator do
+    createCmd MarketControl with
+      operator = p.operator
+      regulator = p.regulator
+      instrument
+      readers = [p.public]
+      status = Trading
+      maxTradeUnits = 50000.0
+      maxDeviationBps = 50.0
+
+  aliceCred <- onboard p p.alice Accredited "US"
+  bobCred <- onboard p p.bob Professional "TW"
+  carolCred <- onboard p p.carol Retail "TW"
+
+  forA_ [p.alice, p.bob, p.carol, p.dave] \investor ->
+    submit p.usd do
+      createCmd CashHolding with issuer = p.usd, owner = investor, currency = "USD", amount = 1000000.0
+
+  pure World with ..
+
+-- | Escrow `amount` for the custodian and have the transfer agent settle it.
+subscribe : World -> Party -> ContractId InvestorCredential -> Decimal -> Script (ContractId FundHolding, World)
+subscribe w investor cred amount = do
+  req <- requestSubscription w investor amount
+  (holding, registerCid, _) <- submit w.p.ta do
+    exerciseCmd req SettleSubscription with
+      termsCid = w.termsCid, registerCid = w.registerCid, navCid = w.navCid, credentialCid = cred
+  pure (holding, w with registerCid)
+
+requestSubscription : World -> Party -> Decimal -> Script (ContractId SubscriptionRequest)
+requestSubscription w investor amount = do
+  now <- getTime
+  cashCid <- largestCash investor
+  (locked, _) <- submit investor do
+    exerciseCmd cashCid Lock with
+      lockedTo = w.p.ta
+      payee = w.p.custodian
+      lockAmount = amount
+      releaseAfter = addRelTime now (days 2)
+      purpose = "subscription " <> w.instrument.symbol
+  submit investor do
+    createCmd SubscriptionRequest with
+      instrument = w.instrument, investor, cashAmount = amount, lockedCashCid = locked
+
+attest : World -> Decimal -> Text -> Script World
+attest w reserveValue ref = do
+  (registerCid, _) <- submit w.p.custodian do
+    exerciseCmd w.registerCid Attest with reserveValue, newStatementRef = ref
+  pure w with registerCid
+
+republishNav : World -> Decimal -> Script World
+republishNav w nav = do
+  navCid <- submit w.p.navAgent do
+    exerciseCmd w.navCid Republish with newNavPerUnit = nav, newMethodologyRef = "amortized-cost; T-bills marked daily"
+  pure w with navCid
+
+-- | The investor's single largest cash holding.
+largestCash : Party -> Script (ContractId CashHolding)
+largestCash owner = do
+  holdings <- queryFilter @CashHolding owner (\c -> c.owner == owner)
+  case holdings of
+    [] -> abort ("no cash for " <> partyToText owner)
+    h :: rest -> pure (fst (foldl (\best c -> if (snd c).amount > (snd best).amount then c else best) h rest))
+
+cashOf : Party -> Script Decimal
+cashOf owner = do
+  holdings <- queryFilter @CashHolding owner (\c -> c.owner == owner)
+  pure (sum (map (\(_, c) -> c.amount) holdings))
+
+unitsOf : Party -> Script Decimal
+unitsOf owner = do
+  holdings <- queryFilter @FundHolding owner (\h -> h.owner == owner)
+  pure (sum (map (\(_, h) -> h.units) holdings))
+
+register : World -> Script FundRegister
+register w = do
+  r <- queryContractId w.p.ta w.registerCid
+  case r of
+    Some reg -> pure reg
+    None -> abort "register not found"
+
+-- | Every unit the regulator can see, whether held or sitting in an escrow,
+--   must equal what the register says is outstanding. This is the auditor's
+--   reconciliation: the transfer agent signs holdings, so nothing in the
+--   model stops it creating stray ones; the regulator's view catches it.
+checkReconciles : World -> Script ()
+checkReconciles w = do
+  let r = w.p.regulator
+      ours i = i == w.instrument
+  held <- sum . map (\(_, c) -> c.units) <$> queryFilter @FundHolding r (\c -> ours c.instrument)
+  offered <- sum . map (\(_, c) -> c.units) <$> queryFilter @TransferOffer r (\c -> ours c.instrument)
+  listed <- sum . map (\(_, c) -> c.units) <$> queryFilter @SellOrder r (\c -> ours c.instrument)
+  matched <- sum . map (\(_, c) -> c.units) <$> queryFilter @MatchedTrade r (\c -> ours c.instrument)
+  redeeming <- sum . map (\(_, c) -> c.units) <$> queryFilter @RedemptionRequest r (\c -> ours c.instrument)
+  paying <- sum . map (\(_, c) -> c.units) <$> queryFilter @RedemptionPayout r (\c -> ours c.instrument)
+  reg <- register w
+  let total = held + offered + listed + matched + redeeming + paying
+  assertMsg ("units on the ledger (" <> show total <> ") != register outstanding (" <> show reg.outstanding <> ")")
+    (total == reg.outstanding)
+
+-- | Submit and require it to fail with a message containing `needle`, so a
+--   test cannot pass because the command failed for some unrelated reason.
+expectFailure : Text -> Party -> Commands a -> Script ()
+expectFailure needle party = expectFailureAs needle (actAs party)
+
+expectFailureAs : Text -> SubmitOptions -> Commands a -> Script ()
+expectFailureAs needle options cmds = do
+  err <- submitWithError options cmds
+  assertMsg ("expected a failure mentioning \"" <> needle <> "\", got: " <> show err) (needle `isInfixOf` show err)
+
+-- | Entry point for `daml start`: a world with one subscription settled.
+demo : Script ()
+demo = do
+  w <- setup
+  (_, w) <- subscribe w w.p.alice w.aliceCred 250000.0
+  _ <- attest w 250000.0 "custodian-statement-day-1"
+  pure ()

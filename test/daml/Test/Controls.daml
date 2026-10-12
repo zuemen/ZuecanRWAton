@@ -1,0 +1,92 @@
+-- | Who can and cannot act alone, plus the housekeeping choices.
+module Test.Controls where
+
+import Daml.Script
+
+import Test.Setup
+import Zuecan.Cash
+import Zuecan.Compliance
+import Zuecan.Fund
+import Zuecan.Holding
+import Zuecan.Types
+
+-- | Neither the transfer agent nor the custodian can rewrite the register on
+--   its own, and the transfer agent cannot take an investor's units without
+--   a choice the investor signed up to.
+noSinglePartyCanRewriteTheBook : Script ()
+noSinglePartyCanRewriteTheBook = do
+  w <- setup
+  (holding, w) <- subscribe w w.p.alice w.aliceCred 100000.0
+  submitMustFail w.p.ta do archiveCmd w.registerCid
+  submitMustFail w.p.custodian do archiveCmd w.registerCid
+  submitMustFail w.p.ta do archiveCmd holding
+  submitMustFail w.p.alice do archiveCmd holding
+  -- The transfer agent cannot issue on its own, even against an investor's
+  -- real cash lock: issuance needs the subscriber's authority, which only the
+  -- investor's own SubscriptionRequest carries.
+  req <- requestSubscription w w.p.bob 50000.0
+  Some r <- queryContractId w.p.bob req
+  submitMustFail w.p.ta do
+    exerciseCmd w.registerCid RecordIssuance with
+      subscriber = w.p.bob, lockedCashCid = r.lockedCashCid, credentialCid = w.bobCred
+      termsCid = w.termsCid, navCid = w.navCid
+  -- Neither side can retire units alone.
+  submitMustFail w.p.ta do
+    exerciseCmd w.registerCid RecordRedemption with units = 1.0, cashOut = 1.0, termsCid = w.termsCid, navCid = w.navCid
+  submitMustFail w.p.custodian do
+    exerciseCmd w.registerCid RecordRedemption with units = 1.0, cashOut = 1.0, termsCid = w.termsCid, navCid = w.navCid
+  -- Even acting together they cannot retire units without paying anything
+  -- (a negative payout would inflate the reserve coverage).
+  expectFailureAs "a redemption must pay out cash" (actAs [w.p.ta, w.p.custodian]) do
+    exerciseCmd w.registerCid RecordRedemption with units = 1.0, cashOut = -1000.0, termsCid = w.termsCid, navCid = w.navCid
+  -- Only the custodian attests to reserves.
+  submitMustFail w.p.ta do
+    exerciseCmd w.registerCid Attest with reserveValue = 1.0e9, newStatementRef = "made up"
+  -- A register needs the custodian's acceptance to exist at all.
+  now <- getTime
+  submitMustFail w.p.ta do
+    createCmd FundRegister with
+      instrument = w.instrument, custodian = w.p.custodian, readers = []
+      outstanding = 0.0, attestedReserve = 1.0e9, attestedAt = now
+      attestationSeq = 0, statementRef = "forged", netFlowSinceAttestation = 0.0, status = Open
+  checkReconciles w
+
+-- | Split, merge, unfreeze and the cash and onboarding odds and ends.
+housekeeping : Script ()
+housekeeping = do
+  w <- setup
+  (holding, w) <- subscribe w w.p.alice w.aliceCred 100000.0
+  (a, b) <- submit w.p.alice do exerciseCmd holding SplitUnits with amount = 1000.0
+  expectFailure "strictly between zero and the holding" w.p.alice do exerciseCmd a SplitUnits with amount = 1000.0
+  merged <- submit w.p.alice do exerciseCmd a MergeUnits with otherCid = b
+  frozen <- submit w.p.ta do exerciseCmd merged Freeze with reason = "hold"
+  expectFailure "the holding is frozen" w.p.alice do exerciseCmd frozen SplitUnits with amount = 1.0
+  thawed <- submit w.p.ta do exerciseCmd frozen Unfreeze with reason = "hold lifted"
+  Some t <- queryContractId w.p.alice thawed
+  assertMsg "units intact after a freeze cycle" (t.units == floor6Units && not t.frozen)
+  checkReconciles w
+
+  -- Cash.
+  c1 <- largestCash w.p.bob
+  (sent, Some change) <- submit w.p.bob do exerciseCmd c1 Transfer with newOwner = w.p.bob, transferAmount = 1.0
+  whole <- submit w.p.bob do exerciseCmd change Merge with otherCid = sent
+  bobCash <- cashOf w.p.bob
+  assertMsg "merge preserves the balance" (bobCash == 1000000.0)
+  expectFailure "covered by the holding" w.p.bob do
+    exerciseCmd whole Transfer with newOwner = w.p.alice, transferAmount = 2000000.0
+
+  -- Onboarding requests can be rejected or withdrawn.
+  r1 <- submit w.p.dave do
+    createCmd CredentialRequest with
+      investor = w.p.dave, compliance = w.p.compliance, requestedClass = Accredited
+      jurisdiction = "US", evidenceHash = "sha256:incomplete"
+  submit w.p.compliance do exerciseCmd r1 Reject with reason = "documents incomplete"
+  r2 <- submit w.p.dave do
+    createCmd CredentialRequest with
+      investor = w.p.dave, compliance = w.p.compliance, requestedClass = Accredited
+      jurisdiction = "US", evidenceHash = "sha256:resubmitted"
+  submit w.p.dave do exerciseCmd r2 Withdraw
+  daveCreds <- query @InvestorCredential w.p.dave
+  assertMsg "dave was never credentialed" (null daveCreds)
+  where
+    floor6Units = 95923.26139
